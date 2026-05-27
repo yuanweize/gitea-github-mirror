@@ -12,6 +12,10 @@ on:
         description: "Concurrent workers"
         type: number
         default: 5
+      skip_repos:
+        description: "Comma-separated repos to skip (e.g. repo1,repo2)"
+        type: string
+        default: ""
       dry_run:
         description: "Dry run (simulate only)"
         type: boolean
@@ -50,6 +54,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.MIRROR_GITHUB_TOKEN }}
           GITHUB_USER: ${{ secrets.GITHUB_USER }}
           MIRROR_INTERVAL: ${{ secrets.MIRROR_INTERVAL }}
+          SKIP_REPOS: ${{ github.event.inputs.skip_repos || secrets.SKIP_REPOS }}
           MAX_WORKERS: ${{ github.event.inputs.workers || '5' }}
           REQUEST_TIMEOUT: "600"
           MAX_RETRIES: "3"

@@ -135,7 +135,8 @@ docker run -d --name gitea-mirror \
    | `GITEA_USER` | 您的 Gitea 用户名 |
    | `MIRROR_GITHUB_TOKEN` | 您的 GitHub PAT（需要 `repo` 权限） |
    | `GITHUB_USER` | 您的 GitHub 用户名 |
-   | `MIRROR_INTERVAL` | *（可选）* 如 `8h0m0s` |
+   | `SKIP_REPOS` | 以逗号分隔的忽略仓库名列表 (例如 `repo1,repo2`) |
+   | `MIRROR_INTERVAL` | *(可选)* 如 `8h0m0s` |
 
    > **⚠️ 注意：** GitHub Token 的 Secret 名称必须是 `MIRROR_GITHUB_TOKEN`（而非 `GITHUB_TOKEN`），因为 `GITHUB_TOKEN` 是 GitHub Actions 的保留变量。
 
