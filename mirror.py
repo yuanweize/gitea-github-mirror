@@ -631,7 +631,7 @@ def delete_gitea_repo(
 def cleanup_failed_migration(
     gitea_url: str,
     gitea_token: str,
-    gitea_user: str,
+    repo_owner: str,
     repo_name: str,
     logger: logging.Logger,
 ) -> bool:
@@ -640,7 +640,7 @@ def cleanup_failed_migration(
     # Wait briefly to let Gitea's internal clone process fail and release locks
     time.sleep(2)
 
-    check_url = f"{gitea_url}/api/v1/repos/{gitea_user}/{repo_name}"
+    check_url = f"{gitea_url}/api/v1/repos/{repo_owner}/{repo_name}"
     req = urllib.request.Request(check_url)
     req.add_header("Authorization", f"token {gitea_token}")
     req.add_header("Accept", "application/json")
@@ -649,9 +649,9 @@ def cleanup_failed_migration(
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         if data.get("empty", False):
-            deleted = delete_gitea_repo(gitea_url, gitea_token, gitea_user, repo_name, logger)
+            deleted = delete_gitea_repo(gitea_url, gitea_token, repo_owner, repo_name, logger)
             if deleted:
-                logger.debug(f"Cleaned up broken shell: {repo_name}")
+                logger.debug(f"Cleaned up broken shell: {repo_owner}/{repo_name}")
             return deleted
     except urllib.error.HTTPError as e:
         if e.code == 404:
@@ -886,7 +886,7 @@ def migrate_single_repo(
                     logger.warning(f"{prefix} ... {T['blocked']} — {reason}")
 
                 # Layer 2: Clean up empty shell for blocked repos too
-                cleanup_failed_migration(gitea_url, gitea_token, gitea_user, repo_name, logger)
+                cleanup_failed_migration(gitea_url, gitea_token, repo_owner, repo_name, logger)
 
                 return {
                     "name": repo_name,
@@ -932,7 +932,7 @@ def migrate_single_repo(
                     last_error = f"HTTP 422: {reason}"
                     with _print_lock:
                         logger.error(f"{prefix} ... {T['failed'].format(last_error)}")
-                    cleanup_failed_migration(gitea_url, gitea_token, gitea_user, repo_name, logger)
+                    cleanup_failed_migration(gitea_url, gitea_token, repo_owner, repo_name, logger)
                     return {
                         "name": repo_name,
                         "status": "failed",
