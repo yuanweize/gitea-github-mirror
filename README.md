@@ -30,6 +30,7 @@ Once configured, Gitea will **automatically sync** from GitHub on a schedule (de
 | Feature | Description |
 |---------|-------------|
 | 🔍 **Auto-Discovery** | Scans all repos via GitHub API (owner + org + collaborator) |
+| 🧮 **Incremental Sync** | Skips repos that already exist on Gitea to reduce API load |
 | 🪞 **Pull Mirror** | Creates Gitea pull-mirrors that auto-sync periodically |
 | ⚡ **Concurrent Workers** | Multi-threaded execution (configurable `MAX_WORKERS`) — N repos migrate in parallel |
 | ✅ **Strict Validation** | Only HTTP 201 = success. No guessing, no false positives |
@@ -162,6 +163,12 @@ All configuration is done via environment variables. Copy `.env.example` to `.en
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MIRROR_INTERVAL` | Server default | Sync interval (e.g., `8h0m0s`) |
+| `MIRROR_LFS` | `false` | Enable Git LFS during mirror migration (`true`/`false`) |
+| `NOTIFY_WEBHOOK` | *(empty)* | Webhook URL for notifications (Slack/Discord/Teams/Feishu/DingTalk/Telegram/etc) |
+| `NOTIFY_TYPE` | *(auto)* | Force webhook type: `slack`, `discord`, `teams`, `feishu`, `dingtalk`, `telegram`, `generic` |
+| `NOTIFY_CHAT_ID` | *(empty)* | Telegram chat_id (required when using Telegram webhook) |
+| `NOTIFY_ONLY_ON_FAILURE` | `false` | Send notifications only when failures occur (`true`/`false`) |
+| `NOTIFY_INCLUDE_REPORT` | `false` | Include report content in notifications (`true`/`false`) |
 | `MAX_WORKERS` | `5` | Concurrent worker threads. Each waits for full HTTP 201 |
 | `REQUEST_TIMEOUT` | `600` | HTTP timeout per request (seconds). Must cover the largest repo clone time |
 | `MAX_RETRIES` | `3` | Max retry attempts per repo on transient errors |

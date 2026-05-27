@@ -32,6 +32,7 @@
 | 特性 | 说明 |
 |------|------|
 | 🔍 **自动发现** | 通过 GitHub API 扫描所有仓库（个人 + 组织 + 协作者） |
+| 🧮 **增量同步** | 先比对 Gitea 已存在仓库，跳过重复迁移，降低 API 压力 |
 | 🪞 **拉取镜像** | 创建 Gitea Pull Mirror，定期自动从 GitHub 拉取更新 |
 | ⚡ **多线程并发** | 可配置 `MAX_WORKERS` 线程数，N 个仓库同时迁移 |
 | ✅ **严格校验** | 只有 HTTP 201 = 成功，绝不猜测、绝不误报 |
@@ -164,6 +165,12 @@ schedule:
 | 变量名 | 默认值 | 说明 |
 |--------|--------|------|
 | `MIRROR_INTERVAL` | 服务器默认 | 同步间隔（如 `8h0m0s`） |
+| `MIRROR_LFS` | `false` | 迁移镜像时启用 Git LFS（`true`/`false`） |
+| `NOTIFY_WEBHOOK` | *(空)* | 通知 Webhook 地址（Slack/Discord/Teams/飞书/钉钉/Telegram 等） |
+| `NOTIFY_TYPE` | *(自动)* | 强制指定类型：`slack`、`discord`、`teams`、`feishu`、`dingtalk`、`telegram`、`generic` |
+| `NOTIFY_CHAT_ID` | *(空)* | Telegram chat_id（Telegram 时必填） |
+| `NOTIFY_ONLY_ON_FAILURE` | `false` | 仅在失败时发送通知（`true`/`false`） |
+| `NOTIFY_INCLUDE_REPORT` | `false` | 通知中包含报告内容（`true`/`false`） |
 | `MAX_WORKERS` | `5` | 并发工作线程数，每个线程独立等待 HTTP 201 |
 | `REQUEST_TIMEOUT` | `600` | 单次 HTTP 请求超时秒数，必须足以覆盖最大仓库的克隆时间 |
 | `MAX_RETRIES` | `3` | 每个仓库的最大重试次数（仅对瞬态错误） |

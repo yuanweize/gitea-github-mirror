@@ -15,6 +15,13 @@ Environment Variables (or .env file):
     GITHUB_TOKEN        - GitHub personal access token (with 'repo' scope)
     GITHUB_USER         - GitHub username for filtering owner repos
     MIRROR_INTERVAL     - (Optional) Mirror sync interval (e.g. '8h0m0s')
+    MIRROR_LFS          - (Optional) Enable Git LFS for migrated mirrors (true/false)
+    NOTIFY_WEBHOOK      - (Optional) Webhook URL for notifications
+    NOTIFY_TYPE         - (Optional) Webhook type override:
+                          slack|discord|teams|feishu|dingtalk|telegram|generic
+    NOTIFY_CHAT_ID      - (Optional) Telegram chat_id when using Telegram webhook
+    NOTIFY_ONLY_ON_FAILURE - (Optional) Send webhook only when failures occur (true/false)
+    NOTIFY_INCLUDE_REPORT  - (Optional) Include report content in webhook (true/false)
     REQUEST_TIMEOUT     - (Optional) HTTP timeout per request in seconds (default: 600)
     MAX_RETRIES         - (Optional) Max retry attempts per repo (default: 3)
     RETRY_DELAY         - (Optional) Initial retry delay in seconds (default: 10)
@@ -26,20 +33,22 @@ Environment Variables (or .env file):
 License: MIT
 """
 
-import urllib.request
-import urllib.error
-import json
-import time
-import os
-import sys
-import logging
 import argparse
 import glob
+import json
+import logging
+import os
 import socket
+import sys
 import threading
+import time
+import urllib.error
+import urllib.request
+import urllib.response
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Dict, List, Set
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -63,6 +72,23 @@ MESSAGES = {
         "prompt_github_token": "👉 Paste your GitHub Token (hidden input, press Enter): ",
         "fetching": "\n🔍 Fetching your GitHub repository list via API...",
         "fetch_fail": "\n❌ Failed to fetch GitHub repos. Check your token. Error: {}",
+        "rate_limit_hit": "\n⏳ GitHub rate limit hit. Sleeping until reset at {} ({}s)...",
+        "rate_limit_skip": "\n⚠️  GitHub rate limit reset time missing; retrying after {}s...",
+        "notify_sent": "\n🔔 Notification sent via webhook.",
+        "notify_failed": "\n⚠️  Notification failed: {}",
+        "dry_run_diff": (
+            "\n🧪 Dry-run: {} new repo(s) would be migrated, {} already exist and would be skipped."
+        ),
+        "fetching_gitea": "\n🔍 Fetching existing repositories from Gitea...",
+        "fetch_gitea_fail": (
+            "\n⚠️  Failed to fetch Gitea repos. Continuing without incremental skip. Error: {}"
+        ),
+        "incremental_summary": "\n🧮 Incremental sync: {} existing on Gitea, {} will be skipped.",
+        "status_header": "\n📋 Repo status (GitHub selection vs Gitea)",
+        "status_legend": "Legend: {} GitHub-only  {} In both  {} Gitea-only",
+        "status_github_only": "GitHub-only",
+        "status_both": "In both",
+        "status_gitea_only": "Gitea-only",
         "scan_result": "\n📦 Scanned {} repos total (Owned: {}, Org/Collab: {}).",
         "section_owned": "【Your Repositories】",
         "section_other": "\n【Organization & Collaborator Repositories】({} repos)",
@@ -71,7 +97,7 @@ MESSAGES = {
         "ask_include_orgs": "\n👉 Also mirror the {} org/collab repos? (y/N): ",
         "include_orgs_yes": "-> Including ALL {} repos.",
         "include_orgs_no": "-> Only your {} owned repos.",
-        "confirm": "\n⚠️  CONFIRM: Create {} pull-mirror(s) on Gitea with {} workers? (y/N): ",
+        "confirm": "\n⚠️  CONFIRM: Use {} workers to create {} pull-mirror(s) on Gitea? (y/N): ",
         "cancelled": "Cancelled.",
         "starting": "\n🚀 Starting concurrent migration ({} workers, {}s timeout per request)...",
         "mirroring": "[{}/{}] {} ... ",
@@ -106,6 +132,19 @@ MESSAGES = {
         "prompt_github_token": "👉 请粘贴 GitHub Token (输入不可见，按回车确认): ",
         "fetching": "\n🔍 正在获取 GitHub 仓库列表...",
         "fetch_fail": "\n❌ 获取 GitHub 仓库失败，请检查 Token。错误: {}",
+        "rate_limit_hit": "\n⏳ 触发 GitHub 速率限制，等待至重置时间 {}（{}s）...",
+        "rate_limit_skip": "\n⚠️  未获取到重置时间，{}s 后重试...",
+        "notify_sent": "\n🔔 已通过 Webhook 发送通知。",
+        "notify_failed": "\n⚠️  通知发送失败: {}",
+        "dry_run_diff": "\n🧪 演习结果: 发现 {} 个新仓库需要迁移，{} 个已存在将被跳过。",
+        "fetching_gitea": "\n🔍 正在获取 Gitea 已存在仓库列表...",
+        "fetch_gitea_fail": "\n⚠️  获取 Gitea 仓库失败，继续执行但不做增量过滤。错误: {}",
+        "incremental_summary": "\n🧮 增量同步: Gitea 已存在 {} 个，将跳过 {} 个。",
+        "status_header": "\n📋 仓库状态对比 (GitHub 选择范围 vs Gitea)",
+        "status_legend": "图例: {} GitHub 独有  {} 两端都有  {} Gitea 独有",
+        "status_github_only": "GitHub 独有",
+        "status_both": "两端都有",
+        "status_gitea_only": "Gitea 独有",
         "scan_result": "\n📦 共扫描到 {} 个仓库 (个人: {} 个，组织/协作: {} 个)。",
         "section_owned": "【个人所属仓库】",
         "section_other": "\n【组织与协作仓库】(共 {} 个)",
@@ -114,7 +153,7 @@ MESSAGES = {
         "ask_include_orgs": "\n👉 是否一并同步上述 {} 个组织/协作仓库？(y/N): ",
         "include_orgs_yes": "-> 合并同步全部 {} 个仓库。",
         "include_orgs_no": "-> 仅同步个人所属的 {} 个仓库。",
-        "confirm": "\n⚠️  最终确认: 即将以 {} 个并发线程创建 {} 个拉取镜像。(y/N): ",
+        "confirm": "\n⚠️  最终确认: 即将使用 {} 个并发线程创建 {} 个拉取镜像。(y/N): ",
         "cancelled": "已取消。",
         "starting": "\n🚀 开始并发迁移 ({} 个线程, 每请求 {}s 超时)...",
         "mirroring": "[{}/{}] {} ... ",
@@ -147,6 +186,198 @@ T = MESSAGES["en"]
 # Thread-safe print lock
 _print_lock = threading.Lock()
 
+Repo = Dict[str, Any]
+Result = Dict[str, Any]
+
+
+def _use_color() -> bool:
+    if os.environ.get("NO_COLOR"):
+        return False
+    if os.environ.get("FORCE_COLOR"):
+        return True
+    return sys.stdout.isatty()
+
+
+def _colorize(text: str, code: str) -> str:
+    if not _use_color():
+        return text
+    return f"\033[{code}m{text}\033[0m"
+
+
+def _format_repo_list(title: str, names: List[str], color_code: str) -> List[str]:
+    lines = [title]
+    for i, name in enumerate(names, 1):
+        label = _colorize(f"{i:03d}. {name}", color_code)
+        lines.append(f"  {label}")
+    return lines
+
+
+def _handle_github_rate_limit(resp: urllib.response.addinfourl, logger: logging.Logger) -> None:
+    remaining = resp.headers.get("X-RateLimit-Remaining")
+    reset_ts = resp.headers.get("X-RateLimit-Reset")
+    if remaining is not None and remaining != "0":
+        return
+
+    wait_seconds = 60
+    if reset_ts:
+        try:
+            reset_at = int(reset_ts)
+            now = int(time.time())
+            wait_seconds = max(0, reset_at - now)
+            reset_str = datetime.fromtimestamp(reset_at).strftime("%Y-%m-%d %H:%M:%S")
+            logger.warning(T["rate_limit_hit"].format(reset_str, wait_seconds))
+        except ValueError:
+            logger.warning(T["rate_limit_skip"].format(wait_seconds))
+    else:
+        logger.warning(T["rate_limit_skip"].format(wait_seconds))
+
+    if wait_seconds > 0:
+        time.sleep(wait_seconds)
+
+
+def _split_text(text: str, max_len: int) -> List[str]:
+    if len(text) <= max_len:
+        return [text]
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = min(start + max_len, len(text))
+        chunks.append(text[start:end])
+        start = end
+    return chunks
+
+
+def _build_summary_text(
+    all_results: List[Result],
+    total_duration: float,
+    max_workers: int,
+    request_timeout: int,
+    lang: str,
+    report_file: Path,
+) -> str:
+    counts = _count_results(all_results)
+    failed_list = []
+    blocked_list = []
+    for r in all_results:
+        if r["status"] == "failed":
+            failed_list.append((r["name"], r["error"]))
+        elif r["status"] == "blocked":
+            blocked_list.append((r["name"], r["error"]))
+
+    total_count = len(all_results)
+    avg_time = total_duration / max(total_count, 1)
+    mins, secs = divmod(int(total_duration), 60)
+    hours, mins = divmod(mins, 60)
+    dur_str = f"{hours}h {mins}m {secs}s" if hours else f"{mins}m {secs}s"
+
+    t = MESSAGES[lang]
+    lines = [
+        f"{t['report_header']}",
+        f"{t['report_total']}: {total_count}",
+        f"{t['report_success']}: {counts['success']}",
+        f"{t['report_skipped']}: {counts['skipped']}",
+        f"{t['report_blocked']}: {counts['blocked']}",
+        f"{t['report_failed']}: {counts['failed']}",
+        f"{t['report_workers']}: {max_workers}",
+        f"{t['report_timeout']}: {request_timeout}s",
+        f"{t['report_duration']}: {dur_str}",
+        f"{t['report_avg']}: {avg_time:.1f}s",
+        f"Report: {report_file.name}",
+    ]
+
+    if blocked_list:
+        lines.append(f"{t['report_blocked_list']}:")
+        for name, err in blocked_list:
+            lines.append(f"- {name}: {err}")
+
+    if failed_list:
+        lines.append(f"{t['report_failed_list']}:")
+        for name, err in failed_list:
+            lines.append(f"- {name}: {err}")
+
+    return "\n".join(lines)
+
+
+def _count_results(all_results: List[Result]) -> Dict[str, int]:
+    counts = {"success": 0, "skipped": 0, "blocked": 0, "failed": 0}
+    for r in all_results:
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
+    return counts
+
+
+def _detect_webhook_type(webhook_url: str, override: str) -> str:
+    if override:
+        return override.lower()
+
+    lower_url = webhook_url.lower()
+    if "api.telegram.org" in lower_url:
+        return "telegram"
+    if "open.feishu.cn" in lower_url or "open.larksuite.com" in lower_url:
+        return "feishu"
+    if "oapi.dingtalk.com" in lower_url:
+        return "dingtalk"
+    if "discord.com/api/webhooks" in lower_url:
+        return "discord"
+    if "hooks.slack.com" in lower_url:
+        return "slack"
+    if "office.com/webhook" in lower_url or "outlook.office.com/webhook" in lower_url:
+        return "teams"
+    return "generic"
+
+
+def _send_webhook_message(
+    webhook_url: str,
+    webhook_type: str,
+    message: str,
+    notify_chat_id: str,
+    logger: logging.Logger,
+    lang: str,
+) -> None:
+    payload = None
+    if webhook_type == "telegram":
+        if not notify_chat_id:
+            raise ValueError("NOTIFY_CHAT_ID is required for Telegram")
+        payload = {"chat_id": notify_chat_id, "text": message}
+    elif webhook_type in {"slack", "discord", "teams", "generic"}:
+        payload = {"text": message}
+    elif webhook_type == "feishu":
+        payload = {"msg_type": "text", "content": {"text": message}}
+    elif webhook_type == "dingtalk":
+        payload = {"msgtype": "text", "text": {"content": message}}
+    else:
+        payload = {"text": message}
+
+    req = urllib.request.Request(
+        webhook_url,
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+    )
+    req.add_header("Content-Type", "application/json")
+    req.add_header("User-Agent", f"gitea-github-mirror/{VERSION}")
+
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        resp.read()
+    logger.info(MESSAGES[lang]["notify_sent"])
+
+
+def _send_webhook_notification(
+    webhook_url: str,
+    webhook_type: str,
+    messages: List[str],
+    notify_chat_id: str,
+    logger: logging.Logger,
+    lang: str,
+) -> None:
+    for message in messages:
+        _send_webhook_message(
+            webhook_url,
+            webhook_type,
+            message,
+            notify_chat_id,
+            logger,
+            lang,
+        )
+
 
 def load_env_file(filepath: Path) -> None:
     """Load .env file into os.environ (does not override existing vars)."""
@@ -176,10 +407,12 @@ def setup_logging(level_name: str) -> logging.Logger:
 
     fh = logging.FileHandler(log_file, encoding="utf-8")
     fh.setLevel(logging.DEBUG)
-    fh.setFormatter(logging.Formatter(
-        "%(asctime)s | %(levelname)-8s | %(threadName)-12s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    ))
+    fh.setFormatter(
+        logging.Formatter(
+            "%(asctime)s | %(levelname)-8s | %(threadName)-12s | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
     logger.addHandler(fh)
 
     ch = logging.StreamHandler(sys.stdout)
@@ -204,7 +437,7 @@ def _rotate_files(directory: Path, pattern: str, max_keep: int) -> None:
 # ---------------------------------------------------------------------------
 # GitHub API
 # ---------------------------------------------------------------------------
-def fetch_github_repos(token: str, logger: logging.Logger) -> list:
+def fetch_github_repos(token: str, logger: logging.Logger) -> List[Repo]:
     """Fetch all repos the authenticated user has access to (paginated)."""
     repos = []
     page = 1
@@ -221,7 +454,34 @@ def fetch_github_repos(token: str, logger: logging.Logger) -> list:
 
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
+                _handle_github_rate_limit(resp, logger)
                 data = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            if e.code in (403, 429):
+                remaining = e.headers.get("X-RateLimit-Remaining")
+                reset_ts = e.headers.get("X-RateLimit-Reset")
+                if remaining == "0" or e.code == 429:
+                    wait_seconds = 60
+                    if reset_ts:
+                        try:
+                            reset_at = int(reset_ts)
+                            now = int(time.time())
+                            wait_seconds = max(0, reset_at - now)
+                            reset_str = datetime.fromtimestamp(reset_at).strftime(
+                                "%Y-%m-%d %H:%M:%S"
+                            )
+                            logger.warning(T["rate_limit_hit"].format(reset_str, wait_seconds))
+                        except ValueError:
+                            logger.warning(T["rate_limit_skip"].format(wait_seconds))
+                    else:
+                        logger.warning(T["rate_limit_skip"].format(wait_seconds))
+
+                    if wait_seconds > 0:
+                        time.sleep(wait_seconds)
+                    continue
+
+            logger.error(T["fetch_fail"].format(e))
+            sys.exit(1)
         except Exception as e:
             logger.error(T["fetch_fail"].format(e))
             sys.exit(1)
@@ -236,10 +496,85 @@ def fetch_github_repos(token: str, logger: logging.Logger) -> list:
 
 
 # ---------------------------------------------------------------------------
+# Gitea API
+# ---------------------------------------------------------------------------
+def fetch_gitea_repo_names(
+    gitea_url: str,
+    gitea_token: str,
+    gitea_user: str,
+    logger: logging.Logger,
+) -> Set[str]:
+    """Fetch repo names owned by the Gitea user (paginated)."""
+    names = set()
+    page = 1
+    while True:
+        url = f"{gitea_url}/api/v1/user/repos?limit=50&page={page}"
+        req = urllib.request.Request(url)
+        req.add_header("Authorization", f"token {gitea_token}")
+        req.add_header("Accept", "application/json")
+        req.add_header("User-Agent", f"gitea-github-mirror/{VERSION}")
+
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+
+        if not data:
+            break
+
+        for repo in data:
+            owner = repo.get("owner", {}).get("login", "")
+            if owner.lower() == gitea_user.lower():
+                name = repo.get("name")
+                if name:
+                    names.add(name)
+
+        logger.debug(f"Gitea API page {page}: {len(data)} repos (owned: {len(names)})")
+        page += 1
+
+    return names
+
+
+def _print_repo_status(
+    logger: logging.Logger, github_repos: List[Repo], gitea_names: Set[str], lang: str
+) -> None:
+    if not gitea_names:
+        return
+
+    github_names = {r["name"] for r in github_repos}
+    github_only = sorted(github_names - gitea_names)
+    both = sorted(github_names & gitea_names)
+    gitea_only = sorted(gitea_names - github_names)
+
+    t = MESSAGES[lang]
+    legend = t["status_legend"].format(
+        _colorize("●", "32"),
+        _colorize("●", "33"),
+        _colorize("●", "34"),
+    )
+
+    logger.info(t["status_header"])
+    logger.info(legend)
+
+    if github_only:
+        header = f"【{t['status_github_only']}】({len(github_only)})"
+        for line in _format_repo_list(header, github_only, "32"):
+            logger.info(line)
+
+    if both:
+        header = f"【{t['status_both']}】({len(both)})"
+        for line in _format_repo_list(header, both, "33"):
+            logger.info(line)
+
+    if gitea_only:
+        header = f"【{t['status_gitea_only']}】({len(gitea_only)})"
+        for line in _format_repo_list(header, gitea_only, "34"):
+            logger.info(line)
+
+
+# ---------------------------------------------------------------------------
 # Gitea Migration — Strict Synchronous with Retries
 # ---------------------------------------------------------------------------
 def migrate_single_repo(
-    repo: dict,
+    repo: Repo,
     index: int,
     total: int,
     gitea_url: str,
@@ -247,12 +582,13 @@ def migrate_single_repo(
     gitea_user: str,
     github_token: str,
     mirror_interval: str,
+    mirror_lfs: bool,
     request_timeout: int,
     max_retries: int,
     retry_delay: int,
     dry_run: bool,
     logger: logging.Logger,
-) -> dict:
+) -> Result:
     """
     Migrate a single GitHub repo to Gitea. Blocks until Gitea returns 201 or fails.
 
@@ -289,6 +625,8 @@ def migrate_single_repo(
     }
     if mirror_interval:
         payload["mirror_interval"] = mirror_interval
+    if mirror_lfs:
+        payload["lfs"] = True
 
     last_error = ""
 
@@ -321,14 +659,24 @@ def migrate_single_repo(
             if e.code == 409 or "already exists" in err_body.lower():
                 with _print_lock:
                     logger.info(T["already_exists"])
-                return {"name": repo_name, "status": "skipped", "duration": time.time() - start, "error": ""}
+                return {
+                    "name": repo_name,
+                    "status": "skipped",
+                    "duration": time.time() - start,
+                    "error": "",
+                }
 
             # --- 403: GitHub blocked the repo (DMCA, TOS, etc.) → skip (no retry) ---
             if e.code == 403 or ("403" in err_body and "access blocked" in err_body.lower()):
                 reason = _extract_error_message(err_body)
                 with _print_lock:
                     logger.warning(T["blocked"] + f" — {reason}")
-                return {"name": repo_name, "status": "blocked", "duration": time.time() - start, "error": reason}
+                return {
+                    "name": repo_name,
+                    "status": "blocked",
+                    "duration": time.time() - start,
+                    "error": reason,
+                }
 
             # --- 422: Invalid request → fail (no retry) ---
             if e.code == 422:
@@ -336,7 +684,12 @@ def migrate_single_repo(
                 last_error = f"HTTP 422: {reason}"
                 with _print_lock:
                     logger.error(T["failed"].format(last_error))
-                return {"name": repo_name, "status": "failed", "duration": time.time() - start, "error": last_error}
+                return {
+                    "name": repo_name,
+                    "status": "failed",
+                    "duration": time.time() - start,
+                    "error": last_error,
+                }
 
             # --- 5xx / other: Retry with exponential backoff ---
             last_error = f"HTTP {e.code}: {_extract_error_message(err_body)}"
@@ -371,7 +724,12 @@ def migrate_single_repo(
                 with _print_lock:
                     logger.error(T["failed"].format(last_error))
 
-    return {"name": repo_name, "status": "failed", "duration": time.time() - start, "error": last_error}
+    return {
+        "name": repo_name,
+        "status": "failed",
+        "duration": time.time() - start,
+        "error": last_error,
+    }
 
 
 def _extract_error_message(body: str) -> str:
@@ -386,6 +744,7 @@ def _extract_error_message(body: str) -> str:
     # Strip HTML tags for Nginx error pages
     if "<html" in body.lower():
         import re
+
         text = re.sub(r"<[^>]+>", " ", body)
         text = " ".join(text.split())
         return text[:200]
@@ -396,7 +755,7 @@ def _extract_error_message(body: str) -> str:
 # Report
 # ---------------------------------------------------------------------------
 def generate_report(
-    all_results: list,
+    all_results: List[Result],
     total_duration: float,
     max_workers: int,
     request_timeout: int,
@@ -431,7 +790,7 @@ def generate_report(
         "",
         f"**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  ",
         f"**Version:** v{VERSION}  ",
-        f"**Mode:** Concurrent (strict synchronous per worker)  ",
+        "**Mode:** Concurrent (strict synchronous per worker)  ",
         "",
         "## Summary",
         "",
@@ -487,7 +846,7 @@ def generate_report(
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
-def main():
+def main() -> None:
     global T
 
     load_env_file(ENV_FILE)
@@ -500,7 +859,9 @@ def main():
     parser.add_argument("--include-orgs", action="store_true", help="Include org/collab repos")
     parser.add_argument("--dry-run", action="store_true", help="Simulate only")
     parser.add_argument("--workers", type=int, default=None, help="Concurrent workers (default: 5)")
-    parser.add_argument("--timeout", type=int, default=None, help="Request timeout seconds (default: 600)")
+    parser.add_argument(
+        "--timeout", type=int, default=None, help="Request timeout seconds (default: 600)"
+    )
     args = parser.parse_args()
 
     lang = args.lang or os.environ.get("LANG_MIRROR", "en")
@@ -519,17 +880,39 @@ def main():
     github_user = os.environ.get("GITHUB_USER", "")
     github_token = os.environ.get("GITHUB_TOKEN", "")
 
-    for var, val in [("GITEA_URL", gitea_url), ("GITEA_TOKEN", gitea_token), ("GITEA_USER", gitea_user), ("GITHUB_USER", github_user)]:
+    for var, val in [
+        ("GITEA_URL", gitea_url),
+        ("GITEA_TOKEN", gitea_token),
+        ("GITEA_USER", gitea_user),
+        ("GITHUB_USER", github_user),
+    ]:
         if not val:
             logger.error(T["env_missing"].format(var))
             sys.exit(1)
 
     if not github_token:
         import getpass
+
         github_token = getpass.getpass(T["prompt_github_token"])
 
     # Tuning
     mirror_interval = os.environ.get("MIRROR_INTERVAL", "")
+    mirror_lfs = os.environ.get("MIRROR_LFS", "").strip().lower() in {"1", "true", "yes", "on"}
+    notify_webhook = os.environ.get("NOTIFY_WEBHOOK", "").strip()
+    notify_type = os.environ.get("NOTIFY_TYPE", "").strip().lower()
+    notify_chat_id = os.environ.get("NOTIFY_CHAT_ID", "").strip()
+    notify_only_on_failure = os.environ.get("NOTIFY_ONLY_ON_FAILURE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    notify_include_report = os.environ.get("NOTIFY_INCLUDE_REPORT", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     request_timeout = args.timeout or int(os.environ.get("REQUEST_TIMEOUT", "600"))
     max_retries = int(os.environ.get("MAX_RETRIES", "3"))
     retry_delay = int(os.environ.get("RETRY_DELAY", "10"))
@@ -574,9 +957,29 @@ def main():
         final_repos = list(all_repos)
         logger.info(T["include_orgs_yes"].format(len(final_repos)))
 
+    # Phase 3.5: Incremental skip (avoid migrate API for existing repos)
+    gitea_existing = set()
+    try:
+        logger.info(T["fetching_gitea"])
+        gitea_existing = fetch_gitea_repo_names(gitea_url, gitea_token, gitea_user, logger)
+    except Exception as e:
+        logger.warning(T["fetch_gitea_fail"].format(str(e)))
+
+    skipped = 0
+    selected_repos = list(final_repos)
+    if gitea_existing:
+        before_count = len(final_repos)
+        final_repos = [r for r in final_repos if r["name"] not in gitea_existing]
+        skipped = before_count - len(final_repos)
+        logger.info(T["incremental_summary"].format(len(gitea_existing), skipped))
+        _print_repo_status(logger, selected_repos, gitea_existing, lang)
+
+    if args.dry_run:
+        logger.info(T["dry_run_diff"].format(len(final_repos), skipped))
+
     # Phase 4: Confirm
     if not args.yes:
-        confirm = input(T["confirm"].format(len(final_repos), max_workers))
+        confirm = input(T["confirm"].format(max_workers, len(final_repos)))
         if confirm.strip().lower() != "y":
             logger.info(T["cancelled"])
             sys.exit(0)
@@ -602,6 +1005,7 @@ def main():
                 gitea_user=gitea_user,
                 github_token=github_token,
                 mirror_interval=mirror_interval,
+                mirror_lfs=mirror_lfs,
                 request_timeout=request_timeout,
                 max_retries=max_retries,
                 retry_delay=retry_delay,
@@ -617,13 +1021,50 @@ def main():
             except Exception as e:
                 name = futures[future]
                 logger.error(f"❌ Unexpected thread error for {name}: {e}")
-                all_results.append({"name": name, "status": "failed", "duration": 0, "error": str(e)})
+                all_results.append(
+                    {"name": name, "status": "failed", "duration": 0, "error": str(e)}
+                )
 
     total_duration = time.time() - start_time
 
     # Phase 6: Report
     logger.info(T["done"])
-    generate_report(all_results, total_duration, max_workers, request_timeout, lang, logger)
+    report_file = generate_report(
+        all_results, total_duration, max_workers, request_timeout, lang, logger
+    )
+
+    if notify_webhook:
+        counts = _count_results(all_results)
+        if notify_only_on_failure and counts.get("failed", 0) == 0:
+            pass
+        else:
+            summary = _build_summary_text(
+                all_results,
+                total_duration,
+                max_workers,
+                request_timeout,
+                lang,
+                report_file,
+            )
+            if notify_include_report:
+                try:
+                    report_text = report_file.read_text(encoding="utf-8")
+                    summary = summary + "\n\n---\n\n" + report_text
+                except OSError:
+                    pass
+            messages = _split_text(summary, 3000)
+            webhook_type = _detect_webhook_type(notify_webhook, notify_type)
+            try:
+                _send_webhook_notification(
+                    notify_webhook,
+                    webhook_type,
+                    messages,
+                    notify_chat_id,
+                    logger,
+                    lang,
+                )
+            except Exception as e:
+                logger.warning(T["notify_failed"].format(str(e)))
 
 
 if __name__ == "__main__":
