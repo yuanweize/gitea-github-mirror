@@ -568,7 +568,7 @@ def delete_gitea_repo(
 ) -> bool:
     """Delete a repo from Gitea. Returns True if deleted, False on error."""
     url = f"{gitea_url}/api/v1/repos/{gitea_user}/{repo_name}"
-    
+
     for attempt in range(1, max_retries + 1):
         req = urllib.request.Request(url, method="DELETE")
         req.add_header("Authorization", f"token {gitea_token}")
@@ -581,10 +581,10 @@ def delete_gitea_repo(
             if e.code == 404:
                 return True  # Already deleted
             if attempt < max_retries:
-                time.sleep(2 ** attempt)
+                time.sleep(2**attempt)
         except Exception as e:
             if attempt < max_retries:
-                time.sleep(2 ** attempt)
+                time.sleep(2**attempt)
             else:
                 logger.debug(f"Failed to delete {repo_name} after {max_retries} attempts: {e}")
 
@@ -599,10 +599,10 @@ def cleanup_failed_migration(
     logger: logging.Logger,
 ) -> bool:
     """Layer 2: After migration failure, check if Gitea created a broken shell and delete it."""
-    
+
     # Wait briefly to let Gitea's internal clone process fail and release locks
     time.sleep(2)
-    
+
     check_url = f"{gitea_url}/api/v1/repos/{gitea_user}/{repo_name}"
     req = urllib.request.Request(check_url)
     req.add_header("Authorization", f"token {gitea_token}")
@@ -706,7 +706,9 @@ def migrate_single_repo(
 
     if dry_run:
         with _print_lock:
-            logger.info(f"{prefix} ... {T['dry_run_prefix']}{clone_url} -> {gitea_user}/{repo_name}")
+            logger.info(
+                f"{prefix} ... {T['dry_run_prefix']}{clone_url} -> {gitea_user}/{repo_name}"
+            )
         return {"name": repo_name, "status": "success", "duration": 0, "error": ""}
 
     payload = {
@@ -735,7 +737,12 @@ def migrate_single_repo(
         if _shutdown_event.is_set():
             with _print_lock:
                 logger.warning(f"{prefix} ... ⚠️ Interrupted")
-            return {"name": repo_name, "status": "failed", "duration": time.time() - start, "error": "Interrupted by user"}
+            return {
+                "name": repo_name,
+                "status": "failed",
+                "duration": time.time() - start,
+                "error": "Interrupted by user",
+            }
 
         req = urllib.request.Request(
             f"{gitea_url}/api/v1/repos/migrate",
@@ -773,18 +780,15 @@ def migrate_single_repo(
                 }
 
             # --- Access blocked: body contains 451 or "access blocked" (Gitea may wrap as 500) ---
-            is_access_blocked = (
-                "access blocked" in err_body.lower()
-                or "451" in err_body
-            )
+            is_access_blocked = "access blocked" in err_body.lower() or "451" in err_body
             if is_access_blocked:
                 reason = _extract_error_message(err_body)
                 with _print_lock:
                     logger.warning(f"{prefix} ... {T['blocked']} — {reason}")
-                
+
                 # Layer 2: Clean up empty shell for blocked repos too
                 cleanup_failed_migration(gitea_url, gitea_token, gitea_user, repo_name, logger)
-                
+
                 return {
                     "name": repo_name,
                     "status": "blocked",
@@ -798,7 +802,9 @@ def migrate_single_repo(
                 if attempt < max_retries:
                     wait = retry_delay * (2 ** (attempt - 1))
                     with _print_lock:
-                        logger.warning(f"{prefix} ... {T['retry'].format(attempt, max_retries, wait, last_error)}")
+                        logger.warning(
+                            f"{prefix} ... {T['retry'].format(attempt, max_retries, wait, last_error)}"
+                        )
                     time.sleep(wait)
                     continue
                 else:
@@ -814,7 +820,9 @@ def migrate_single_repo(
                     if attempt < max_retries:
                         wait = retry_delay * (2 ** (attempt - 1))
                         with _print_lock:
-                            logger.warning(f"{prefix} ... {T['retry'].format(attempt, max_retries, wait, last_error)}")
+                            logger.warning(
+                                f"{prefix} ... {T['retry'].format(attempt, max_retries, wait, last_error)}"
+                            )
                         time.sleep(wait)
                         continue
                     else:
@@ -838,7 +846,9 @@ def migrate_single_repo(
             if attempt < max_retries:
                 wait = retry_delay * (2 ** (attempt - 1))
                 with _print_lock:
-                    logger.warning(f"{prefix} ... {T['retry'].format(attempt, max_retries, wait, last_error)}")
+                    logger.warning(
+                        f"{prefix} ... {T['retry'].format(attempt, max_retries, wait, last_error)}"
+                    )
                 time.sleep(wait)
             else:
                 with _print_lock:
@@ -849,7 +859,9 @@ def migrate_single_repo(
             if attempt < max_retries:
                 wait = retry_delay * (2 ** (attempt - 1))
                 with _print_lock:
-                    logger.warning(f"{prefix} ... {T['retry'].format(attempt, max_retries, wait, last_error)}")
+                    logger.warning(
+                        f"{prefix} ... {T['retry'].format(attempt, max_retries, wait, last_error)}"
+                    )
                 time.sleep(wait)
             else:
                 with _print_lock:
@@ -860,7 +872,9 @@ def migrate_single_repo(
             if attempt < max_retries:
                 wait = retry_delay * (2 ** (attempt - 1))
                 with _print_lock:
-                    logger.warning(f"{prefix} ... {T['retry'].format(attempt, max_retries, wait, last_error)}")
+                    logger.warning(
+                        f"{prefix} ... {T['retry'].format(attempt, max_retries, wait, last_error)}"
+                    )
                 time.sleep(wait)
             else:
                 with _print_lock:
@@ -1146,9 +1160,11 @@ def main() -> None:
         before_count = len(final_repos)
         final_repos = [r for r in final_repos if r["name"] not in healthy_names]
         skipped = before_count - len(final_repos)
-        logger.info(T["incremental_summary"].format(
-            len(gitea_repos), len(healthy_names), len(broken_names), new_count
-        ))
+        logger.info(
+            T["incremental_summary"].format(
+                len(gitea_repos), len(healthy_names), len(broken_names), new_count
+            )
+        )
         _print_repo_status(logger, selected_repos, gitea_repos, broken_names, lang)
 
     if args.dry_run:
@@ -1168,10 +1184,12 @@ def main() -> None:
 
     # Register graceful shutdown handler (Ctrl+C)
     _original_sigint = signal.getsignal(signal.SIGINT)
+
     def _handle_sigint(sig, frame):
         _shutdown_event.set()
         with _print_lock:
             logger.warning("\n⚠️  Shutdown signal received, finishing current tasks...")
+
     signal.signal(signal.SIGINT, _handle_sigint)
 
     # Assign indices before submitting to thread pool
