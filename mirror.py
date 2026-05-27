@@ -1079,10 +1079,18 @@ def main() -> None:
     max_retries = int(os.environ.get("MAX_RETRIES", "3"))
     retry_delay = int(os.environ.get("RETRY_DELAY", "10"))
     max_workers = args.workers or int(os.environ.get("MAX_WORKERS", "5"))
+    skip_repos_str = os.environ.get("SKIP_REPOS", "").strip()
+    skip_repos = {r.strip() for r in skip_repos_str.split(",")} if skip_repos_str else set()
 
     # Phase 1: Fetch
     logger.info(T["fetching"])
-    all_repos = fetch_github_repos(github_token, logger)
+    all_repos_raw = fetch_github_repos(github_token, logger)
+    all_repos = [r for r in all_repos_raw if r["name"] not in skip_repos]
+    
+    if skip_repos:
+        skipped_count = len(all_repos_raw) - len(all_repos)
+        if skipped_count > 0:
+            logger.info(f"Skipped {skipped_count} explicitly ignored repos (SKIP_REPOS).")
 
     owner_repos = [r for r in all_repos if r["owner"]["login"].lower() == github_user.lower()]
     other_repos = [r for r in all_repos if r["owner"]["login"].lower() != github_user.lower()]
