@@ -4,10 +4,11 @@ Gitea GitHub Mirror - Bulk mirror all GitHub repositories to a self-hosted Gitea
 
 This tool automatically discovers all repositories under your GitHub account
 (including private, public, forked, organization-member, and collaborator repos)
-and creates pull-mirror clones on your Gitea server for disaster recovery and backup.
+and dispatches pull-mirror creation requests to your Gitea server using a
+fire-and-forget pattern to avoid Nginx 504 timeout issues.
 
 Usage:
-    python3 mirror.py [--lang en|cn] [--yes] [--include-orgs] [--dry-run]
+    python3 mirror.py [--lang en|cn] [--yes] [--include-orgs] [--dry-run] [--timeout SECONDS]
 
 Environment Variables (or .env file):
     GITEA_URL           - Your Gitea instance URL (e.g. https://git.example.com)
@@ -16,11 +17,13 @@ Environment Variables (or .env file):
     GITHUB_TOKEN        - GitHub personal access token (with 'repo' scope)
     GITHUB_USER         - GitHub username for filtering owner repos
     MIRROR_INTERVAL     - (Optional) Mirror sync interval (e.g. '8h0m0s', default: Gitea server default)
+    REQUEST_TIMEOUT     - (Optional) HTTP request timeout in seconds (default: 15)
     MAX_RETRIES         - (Optional) Max retry attempts per repo (default: 3)
     RETRY_DELAY         - (Optional) Initial retry delay in seconds (default: 5)
+    DISPATCH_DELAY      - (Optional) Delay between dispatches in seconds (default: 0.5)
     LOG_LEVEL           - (Optional) Logging level: DEBUG, INFO, WARNING, ERROR (default: INFO)
     REPORT_MAX_COUNT    - (Optional) Max number of archived reports to keep (default: 50)
-    LANG                - (Optional) Language: 'en' or 'cn' (default: en)
+    LANG_MIRROR         - (Optional) Language: 'en' or 'cn' (default: en)
 
 License: MIT
 """
@@ -34,13 +37,14 @@ import sys
 import logging
 import argparse
 import glob
+import socket
 from datetime import datetime, timezone
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 SCRIPT_DIR = Path(__file__).resolve().parent
 LOGS_DIR = SCRIPT_DIR / "logs"
 REPORTS_DIR = SCRIPT_DIR / "reports"
@@ -67,18 +71,20 @@ MESSAGES = {
         "ask_include_orgs": "\n👉 Optional: Also mirror the {} org/collab repos listed above? (y/N, default N = only your own): ",
         "include_orgs_yes": "-> Including ALL {} repos.",
         "include_orgs_no": "-> Excluding org repos. Mirroring only your {} owned repos.",
-        "confirm": "\n⚠️  FINAL CONFIRMATION: About to create {} pull-mirror(s) on Gitea. Proceed? (y/N): ",
+        "confirm": "\n⚠️  FINAL CONFIRMATION: About to dispatch {} pull-mirror request(s) to Gitea. Proceed? (y/N): ",
         "cancelled": "Operation cancelled. You can re-run anytime.",
-        "starting": "\n🚀 Starting bulk mirror creation on Gitea...",
-        "mirroring": "🔄 [{}/{}] Mirroring -> {} ... ",
-        "success": "✅ OK!",
+        "starting": "\n🚀 Starting bulk mirror dispatch (fire-and-forget mode)...",
+        "dispatching": "🔄 [{}/{}] Dispatching -> {} ... ",
+        "success": "✅ Created!",
+        "dispatched": "📨 Dispatched! (server processing in background)",
         "already_exists": "⚠️  Already exists, skipped.",
         "retry": "   ⏳ Retry {}/{} in {}s ...",
         "failed": "❌ FAILED: {}",
-        "done": "\n🎉 Bulk mirror job complete!",
+        "done": "\n🎉 Bulk mirror dispatch complete!",
         "report_header": "Execution Report",
         "report_total": "Total repos processed",
-        "report_success": "Successfully mirrored",
+        "report_success": "Confirmed created",
+        "report_dispatched": "Dispatched (background)",
         "report_skipped": "Already existed (skipped)",
         "report_failed": "Failed",
         "report_duration": "Total duration",
@@ -92,31 +98,33 @@ MESSAGES = {
         "banner": f"""
 ╔══════════════════════════════════════════════════════════╗
 ║       Gitea ⇄ GitHub  批量镜像同步工具  v{VERSION}       ║
-║       将您的全部 GitHub 仓库镜像到 Gitea                ║
+║       将您的全部 GitHub 仓库镜像备份到 Gitea            ║
 ╚══════════════════════════════════════════════════════════╝""",
         "prompt_github_token": "👉 请粘贴您的 GitHub Token (输入不可见，按回车确认): ",
-        "fetching": "\n🔍 正在通过 API 获取您的 GitHub 仓库列表...",
-        "fetch_fail": "\n❌ 获取 GitHub 仓库失败，请检查 Token。报错: {}",
+        "fetching": "\n🔍 正在通过 GitHub API 获取您的仓库列表...",
+        "fetch_fail": "\n❌ 获取 GitHub 仓库失败，请检查 Token 是否正确且未过期。错误详情: {}",
         "scan_result": "\n📦 共扫描到 {} 个仓库 (个人所属: {} 个，组织/协作所属: {} 个)。",
         "section_owned": "【个人所属仓库】",
         "section_other": "\n【组织与协作仓库】(共 {} 个，属于其他账号或组织)",
         "vis_private": "🔒私有",
         "vis_public": "🌐公开",
-        "ask_include_orgs": "\n👉 可选项：是否要将上述 {} 个【组织与协作仓库】一并同步？(y/N, 默认N仅同步个人库): ",
+        "ask_include_orgs": "\n👉 可选项：是否要将上述 {} 个【组织与协作仓库】一并同步？(y/N, 默认 N 仅同步个人库): ",
         "include_orgs_yes": "-> 已选择：合并同步全部 {} 个仓库。",
         "include_orgs_no": "-> 已选择：排除组织库，仅同步个人所属的 {} 个仓库。",
-        "confirm": "\n⚠️  最终确认：即将把选定的 {} 个仓库配置到 Gitea，并设定为【自动拉取镜像】。(输入 y 开始, 输入 n 退出): ",
+        "confirm": "\n⚠️  最终确认：即将向 Gitea 下发 {} 个仓库的【自动拉取镜像】创建请求。(输入 y 开始, 输入 n 退出): ",
         "cancelled": "已取消操作。您可以随时重新运行。",
-        "starting": "\n🚀 开始在 Gitea 创建批量镜像...",
-        "mirroring": "🔄 [{}/{}] 正在配置镜像 -> {} ... ",
-        "success": "✅ 成功!",
+        "starting": "\n🚀 开始批量下发镜像请求 (触发即走模式)...",
+        "dispatching": "🔄 [{}/{}] 正在下发 -> {} ... ",
+        "success": "✅ 已创建!",
+        "dispatched": "📨 已下发! (服务器后台处理中)",
         "already_exists": "⚠️  已存在，跳过。",
         "retry": "   ⏳ 第 {}/{} 次重试，等待 {}s ...",
         "failed": "❌ 失败: {}",
-        "done": "\n🎉 批量同步作业完成！",
+        "done": "\n🎉 批量镜像请求下发完成！",
         "report_header": "执行报告",
         "report_total": "处理仓库总数",
-        "report_success": "成功镜像",
+        "report_success": "确认创建成功",
+        "report_dispatched": "已下发(后台处理中)",
         "report_skipped": "已存在(跳过)",
         "report_failed": "失败",
         "report_duration": "总耗时",
@@ -225,32 +233,42 @@ def fetch_github_repos(token: str, logger: logging.Logger) -> list:
 
 
 # ---------------------------------------------------------------------------
-# Gitea Migration API
+# Gitea Migration API — Fire-and-Forget Pattern
 # ---------------------------------------------------------------------------
-def migrate_repo_to_gitea(
+def dispatch_mirror_request(
     repo: dict,
     gitea_url: str,
     gitea_token: str,
     gitea_user: str,
     github_token: str,
     mirror_interval: str,
+    request_timeout: int,
     max_retries: int,
     retry_delay: int,
     dry_run: bool,
     logger: logging.Logger,
 ) -> str:
     """
-    Create a pull-mirror on Gitea for a single GitHub repo.
+    Dispatch a pull-mirror creation request to Gitea for a single GitHub repo.
+
+    Uses a fire-and-forget pattern with a short HTTP timeout to avoid
+    Nginx 504 Gateway Timeout errors on large repositories. Gitea processes
+    the actual git clone in a background goroutine queue, so we only need
+    the API to acknowledge receipt of the request.
 
     Returns:
-        'success' | 'skipped' | 'failed'
+        'success'    — API returned 201 Created (confirmed)
+        'dispatched' — Request was accepted but timed out waiting for response
+                       (Gitea is processing in background, this is normal for large repos)
+        'skipped'    — Repo already exists on Gitea (409 Conflict)
+        'failed'     — Unrecoverable error after all retries
     """
     repo_name = repo["name"]
     clone_url = repo["clone_url"]
     is_private = repo["private"]
 
     if dry_run:
-        logger.info(T["dry_run_prefix"] + f"Would mirror: {clone_url} -> {gitea_url}/{gitea_user}/{repo_name}")
+        logger.info(T["dry_run_prefix"] + f"Would dispatch: {clone_url} -> {gitea_url}/{gitea_user}/{repo_name}")
         return "success"
 
     payload = {
@@ -282,9 +300,10 @@ def migrate_repo_to_gitea(
         req.add_header("User-Agent", f"gitea-github-mirror/{VERSION}")
 
         try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
+            with urllib.request.urlopen(req, timeout=request_timeout) as resp:
                 resp.read()
-            return "success"
+                # 201 Created — Gitea confirmed mirror was created
+                return "success"
 
         except urllib.error.HTTPError as e:
             err_body = ""
@@ -293,22 +312,51 @@ def migrate_repo_to_gitea(
             except Exception:
                 pass
 
-            # Already exists → skip without retry
+            # 409 Conflict or "already exists" → skip without retry
             if e.code == 409 or "already exists" in err_body.lower():
                 return "skipped"
 
-            # Unprocessable (e.g. invalid repo) → no retry
+            # 504 Gateway Timeout — Nginx cut the connection, but Gitea
+            # has already accepted the task and is cloning in background.
+            # This is EXPECTED for large repos. Treat as dispatched.
+            if e.code == 504:
+                logger.debug(f"  [504 for {repo_name}] Nginx timeout, but Gitea is processing in background.")
+                return "dispatched"
+
+            # 502 Bad Gateway — similar to 504, Gitea is likely still processing
+            if e.code == 502:
+                logger.debug(f"  [502 for {repo_name}] Gateway error, Gitea may be processing in background.")
+                return "dispatched"
+
+            # 422 Unprocessable Entity — genuinely invalid request, no retry
             if e.code == 422:
                 logger.error(T["failed"].format(f"HTTP {e.code}: {err_body[:200]}"))
                 return "failed"
 
-            # Retryable errors (5xx, 429, timeout, etc.)
+            # Other 5xx — retry with exponential backoff
             if attempt < max_retries:
-                wait = retry_delay * (2 ** (attempt - 1))  # Exponential backoff
+                wait = retry_delay * (2 ** (attempt - 1))
                 logger.warning(T["retry"].format(attempt, max_retries, wait))
                 time.sleep(wait)
             else:
                 logger.error(T["failed"].format(f"HTTP {e.code}: {err_body[:200]}"))
+                return "failed"
+
+        except (socket.timeout, urllib.error.URLError) as e:
+            # Socket-level timeout or connection error.
+            # For timeouts: Gitea likely accepted the request — treat as dispatched.
+            err_str = str(e).lower()
+            if "timed out" in err_str or "timeout" in err_str:
+                logger.debug(f"  [Timeout for {repo_name}] Socket timeout, Gitea likely processing in background.")
+                return "dispatched"
+
+            # Connection refused / DNS error — retry
+            if attempt < max_retries:
+                wait = retry_delay * (2 ** (attempt - 1))
+                logger.warning(T["retry"].format(attempt, max_retries, wait))
+                time.sleep(wait)
+            else:
+                logger.error(T["failed"].format(str(e)[:200]))
                 return "failed"
 
         except Exception as e:
@@ -349,8 +397,9 @@ def generate_report(
     lines = [
         f"# 📊 {t['report_header']}",
         f"",
-        f"**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        f"**Version:** v{VERSION}",
+        f"**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  ",
+        f"**Version:** v{VERSION}  ",
+        f"**Mode:** Fire-and-Forget (async dispatch)  ",
         f"",
         f"## Summary",
         f"",
@@ -358,6 +407,7 @@ def generate_report(
         f"|--------|-------|",
         f"| {t['report_total']} | {total_count} |",
         f"| {t['report_success']} | {results.get('success', 0)} |",
+        f"| {t['report_dispatched']} | {results.get('dispatched', 0)} |",
         f"| {t['report_skipped']} | {results.get('skipped', 0)} |",
         f"| {t['report_failed']} | {results.get('failed', 0)} |",
         f"| {t['report_duration']} | {duration_str} |",
@@ -377,15 +427,16 @@ def generate_report(
 
     # Console summary
     logger.info("")
-    logger.info("=" * 50)
+    logger.info("=" * 55)
     logger.info(f"📊 {t['report_header']}")
-    logger.info(f"   {t['report_total']}: {total_count}")
-    logger.info(f"   {t['report_success']}: {results.get('success', 0)}")
-    logger.info(f"   {t['report_skipped']}: {results.get('skipped', 0)}")
-    logger.info(f"   {t['report_failed']}: {results.get('failed', 0)}")
-    logger.info(f"   {t['report_duration']}: {duration_str}")
-    logger.info(f"   {t['report_avg']}: {avg_time:.1f}s")
-    logger.info("=" * 50)
+    logger.info(f"   {t['report_total']}:      {total_count}")
+    logger.info(f"   {t['report_success']}:    {results.get('success', 0)}")
+    logger.info(f"   {t['report_dispatched']}: {results.get('dispatched', 0)}")
+    logger.info(f"   {t['report_skipped']}:    {results.get('skipped', 0)}")
+    logger.info(f"   {t['report_failed']}:          {results.get('failed', 0)}")
+    logger.info(f"   {t['report_duration']}:       {duration_str}")
+    logger.info(f"   {t['report_avg']}:  {avg_time:.1f}s")
+    logger.info("=" * 55)
 
     # Rotate old reports
     max_reports = int(os.environ.get("REPORT_MAX_COUNT", "50"))
@@ -409,14 +460,17 @@ def main():
         description="Bulk mirror all GitHub repositories to a self-hosted Gitea instance.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--lang", choices=["en", "cn"], default=os.environ.get("LANG_MIRROR", os.environ.get("LANG", "en")[:2].lower()), help="UI language (en/cn)")
+    parser.add_argument("--lang", choices=["en", "cn"], default=None, help="UI language (en/cn)")
     parser.add_argument("--yes", "-y", action="store_true", help="Skip all confirmation prompts")
     parser.add_argument("--include-orgs", action="store_true", help="Include organization & collaborator repos")
     parser.add_argument("--dry-run", action="store_true", help="Simulate without making any API calls to Gitea")
+    parser.add_argument("--timeout", type=int, default=None, help="HTTP request timeout in seconds (default: 15)")
     args = parser.parse_args()
 
-    # Normalize language
-    lang = args.lang if args.lang in ("en", "cn") else "en"
+    # Normalize language: CLI > env > default
+    lang = args.lang or os.environ.get("LANG_MIRROR", "en")
+    if lang not in ("en", "cn"):
+        lang = "en"
     T = MESSAGES[lang]
 
     # Setup logging
@@ -444,8 +498,10 @@ def main():
 
     # Tuning parameters
     mirror_interval = os.environ.get("MIRROR_INTERVAL", "")
+    request_timeout = args.timeout or int(os.environ.get("REQUEST_TIMEOUT", "15"))
     max_retries = int(os.environ.get("MAX_RETRIES", "3"))
     retry_delay = int(os.environ.get("RETRY_DELAY", "5"))
+    dispatch_delay = float(os.environ.get("DISPATCH_DELAY", "0.5"))
 
     # ---- Phase 1: Fetch all GitHub repos ----
     logger.info(T["fetching"])
@@ -457,7 +513,7 @@ def main():
     logger.info(T["scan_result"].format(len(all_repos), len(owner_repos), len(other_repos)))
 
     # ---- Phase 2: Display categorized list ----
-    logger.info("-" * 50)
+    logger.info("-" * 55)
     logger.info(T["section_owned"])
     for i, repo in enumerate(owner_repos, 1):
         vis = T["vis_private"] if repo["private"] else T["vis_public"]
@@ -468,7 +524,7 @@ def main():
         for i, repo in enumerate(other_repos, 1):
             vis = T["vis_private"] if repo["private"] else T["vis_public"]
             logger.info(f"  {i:03d}. [{vis}] [{repo['owner']['login']}] {repo['name']}")
-    logger.info("-" * 50)
+    logger.info("-" * 55)
 
     # ---- Phase 3: Ask optional inclusion ----
     final_repos = list(owner_repos)
@@ -493,22 +549,23 @@ def main():
             logger.info(T["cancelled"])
             sys.exit(0)
 
-    # ---- Phase 5: Execute mirroring ----
+    # ---- Phase 5: Fire-and-forget dispatch ----
     logger.info(T["starting"])
     start_time = time.time()
-    results = {"success": 0, "skipped": 0, "failed": 0}
+    results = {"success": 0, "dispatched": 0, "skipped": 0, "failed": 0}
     failed_repos = []
 
     for idx, repo in enumerate(final_repos, 1):
-        logger.info(T["mirroring"].format(idx, len(final_repos), repo["name"]))
+        logger.info(T["dispatching"].format(idx, len(final_repos), repo["name"]))
 
-        status = migrate_repo_to_gitea(
+        status = dispatch_mirror_request(
             repo=repo,
             gitea_url=gitea_url,
             gitea_token=gitea_token,
             gitea_user=gitea_user,
             github_token=github_token,
             mirror_interval=mirror_interval,
+            request_timeout=request_timeout,
             max_retries=max_retries,
             retry_delay=retry_delay,
             dry_run=args.dry_run,
@@ -517,6 +574,8 @@ def main():
 
         if status == "success":
             logger.info(T["success"])
+        elif status == "dispatched":
+            logger.info(T["dispatched"])
         elif status == "skipped":
             logger.info(T["already_exists"])
         else:
@@ -524,9 +583,9 @@ def main():
 
         results[status] = results.get(status, 0) + 1
 
-        # Rate-limit: 1 request per second
-        if not args.dry_run:
-            time.sleep(1)
+        # Short delay between dispatches to be kind to the API
+        if not args.dry_run and idx < len(final_repos):
+            time.sleep(dispatch_delay)
 
     total_duration = time.time() - start_time
 
