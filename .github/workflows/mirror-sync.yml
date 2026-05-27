@@ -24,6 +24,14 @@ on:
         description: "Preserve GitHub organization structure"
         type: boolean
         default: true
+      sync_now:
+        description: "Trigger immediate mirror sync for existing repos"
+        type: boolean
+        default: false
+      force_recreate:
+        description: "Force delete and remigrate existing repos (Dangerous!)"
+        type: boolean
+        default: false
       dry_run:
         description: "Dry run (simulate only)"
         type: boolean
@@ -65,6 +73,8 @@ jobs:
           SKIP_REPOS: ${{ github.event.inputs.skip_repos || secrets.SKIP_REPOS }}
           MIRROR_EXTRAS: ${{ github.event.inputs.mirror_extras || secrets.MIRROR_EXTRAS }}
           PRESERVE_ORGS: ${{ github.event.inputs.preserve_orgs || secrets.PRESERVE_ORGS }}
+          SYNC_NOW: ${{ github.event.inputs.sync_now || secrets.SYNC_NOW }}
+          FORCE_RECREATE: ${{ github.event.inputs.force_recreate || secrets.FORCE_RECREATE }}
           MAX_WORKERS: ${{ github.event.inputs.workers || '5' }}
           REQUEST_TIMEOUT: "600"
           MAX_RETRIES: "3"

@@ -137,6 +137,8 @@ docker run -d --name gitea-mirror \
    | `MIRROR_INTERVAL` | Synchronization interval (e.g. `8h0m0s`) |
    | `MIRROR_EXTRAS` | Set to `true` to migrate issues, wiki, labels, releases, and milestones |
    | `PRESERVE_ORGS` | Set to `true` to automatically recreate GitHub organizations in Gitea |
+   | `SYNC_NOW` | Set to `true` to immediately trigger a mirror sync for existing repositories |
+   | `FORCE_RECREATE` | Set to `true` to force delete and remigrate existing repositories (WARNING: Dangerous!) |
 
    > **⚠️ Important:** The GitHub token secret is named `MIRROR_GITHUB_TOKEN` (not `GITHUB_TOKEN`) because `GITHUB_TOKEN` is reserved by GitHub Actions.
 
@@ -181,6 +183,10 @@ All configuration is done via environment variables. Copy `.env.example` to `.en
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MIRROR_INTERVAL` | Server default | Sync interval (e.g., `8h0m0s`) |
+| `MIRROR_EXTRAS` | `false` | Migrate issues, wiki, labels, and releases (`true`/`false`) |
+| `PRESERVE_ORGS` | `false` | Automatically recreate GitHub organizations in Gitea (`true`/`false`) |
+| `SYNC_NOW` | `false` | Immediately trigger mirror sync for existing repos (`true`/`false`) |
+| `FORCE_RECREATE` | `false` | Force delete and remigrate existing repos (`true`/`false`, dangerous) |
 | `MIRROR_LFS` | `false` | Enable Git LFS during mirror migration (`true`/`false`) |
 | `NOTIFY_WEBHOOK` | *(empty)* | Webhook URL for notifications (Slack/Discord/Teams/Feishu/DingTalk/Telegram/etc) |
 | `NOTIFY_TYPE` | *(auto)* | Force webhook type: `slack`, `discord`, `teams`, `feishu`, `dingtalk`, `telegram`, `generic` |

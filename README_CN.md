@@ -139,6 +139,8 @@ docker run -d --name gitea-mirror \
    | `MIRROR_INTERVAL` | *(可选)* 如 `8h0m0s` |
    | `MIRROR_EXTRAS` | *(可选)* 设为 `true` 以同步 Issues、Wiki、标签和发布版 |
    | `PRESERVE_ORGS` | *(可选)* 设为 `true` 以自动在 Gitea 重建 GitHub 组织架构 |
+   | `SYNC_NOW` | *(可选)* 设为 `true` 以立即触发已有仓库的拉取更新 |
+   | `FORCE_RECREATE` | *(可选)* 设为 `true` 强制删除并在 Gitea 重建所有现有仓库（警告：极其危险！） |
 
    > **⚠️ 注意：** GitHub Token 的 Secret 名称必须是 `MIRROR_GITHUB_TOKEN`（而非 `GITHUB_TOKEN`），因为 `GITHUB_TOKEN` 是 GitHub Actions 的保留变量。
 
@@ -183,6 +185,10 @@ schedule:
 | 变量名 | 默认值 | 说明 |
 |--------|--------|------|
 | `MIRROR_INTERVAL` | 服务器默认 | 同步间隔（如 `8h0m0s`） |
+| `MIRROR_EXTRAS` | `false` | 同步 Issues、Wiki、标签和发布版（`true`/`false`） |
+| `PRESERVE_ORGS` | `false` | 自动在 Gitea 中重建 GitHub 组织架构（`true`/`false`） |
+| `SYNC_NOW` | `false` | 立即触发老仓库同步更新（`true`/`false`） |
+| `FORCE_RECREATE` | `false` | 强制删除现有仓库并重新搬家（`true`/`false`，极为危险） |
 | `MIRROR_LFS` | `false` | 迁移镜像时启用 Git LFS（`true`/`false`） |
 | `NOTIFY_WEBHOOK` | *(空)* | 通知 Webhook 地址（Slack/Discord/Teams/飞书/钉钉/Telegram 等） |
 | `NOTIFY_TYPE` | *(自动)* | 强制指定类型：`slack`、`discord`、`teams`、`feishu`、`dingtalk`、`telegram`、`generic` |

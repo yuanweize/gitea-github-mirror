@@ -519,12 +519,11 @@ def fetch_github_repos(token: str, logger: logging.Logger) -> List[Repo]:
 def fetch_gitea_repos(
     gitea_url: str,
     gitea_token: str,
-    gitea_user: str,
     logger: logging.Logger,
 ) -> Dict[str, Dict[str, Any]]:
-    """Fetch repos owned by the Gitea user with health metadata (paginated).
+    """Fetch repos the Gitea user has access to with health metadata (paginated).
 
-    Returns dict: {repo_name: {"mirror": bool, "empty": bool, "original_url": str}}
+    Returns dict: {"owner/repo_name": {"mirror": bool, "empty": bool, "original_url": str, "owner": str, "name": str}}
     """
     repos: Dict[str, Dict[str, Any]] = {}
     page = 1
@@ -543,16 +542,18 @@ def fetch_gitea_repos(
 
         for repo in data:
             owner = repo.get("owner", {}).get("login", "")
-            if owner.lower() == gitea_user.lower():
-                name = repo.get("name")
-                if name:
-                    repos[name] = {
-                        "mirror": repo.get("mirror", False),
-                        "empty": repo.get("empty", False),
-                        "original_url": repo.get("original_url", ""),
-                    }
+            name = repo.get("name")
+            if owner and name:
+                key = f"{owner.lower()}/{name.lower()}"
+                repos[key] = {
+                    "mirror": repo.get("mirror", False),
+                    "empty": repo.get("empty", False),
+                    "original_url": repo.get("original_url", ""),
+                    "owner": owner,
+                    "name": name,
+                }
 
-        logger.debug(f"Gitea API page {page}: {len(data)} repos (owned: {len(repos)})")
+        logger.debug(f"Gitea API page {page}: {len(data)} repos fetched")
         page += 1
 
     return repos
@@ -1155,6 +1156,18 @@ def main() -> None:
         "yes",
         "on",
     }
+    sync_now = os.environ.get("SYNC_NOW", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    force_recreate = os.environ.get("FORCE_RECREATE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
     # Phase 1: Fetch
     logger.info(T["fetching"])
@@ -1205,49 +1218,88 @@ def main() -> None:
     gitea_repos: Dict[str, Dict[str, Any]] = {}
     try:
         logger.info(T["fetching_gitea"])
-        gitea_repos = fetch_gitea_repos(gitea_url, gitea_token, gitea_user, logger)
+        gitea_repos = fetch_gitea_repos(gitea_url, gitea_token, logger)
     except Exception as e:
         logger.warning(T["fetch_gitea_fail"].format(str(e)))
 
     skipped = 0
-    broken_names: Set[str] = set()
+    broken_keys: Set[str] = set()
     selected_repos = list(final_repos)
+    
+    # Helper to get expected Gitea key for a GitHub repo
+    def _get_expected_key(repo: Repo) -> str:
+        owner = gitea_user
+        if preserve_orgs and repo.get("owner") and repo["owner"].get("type") == "Organization":
+            owner = repo["owner"]["login"]
+        return f"{owner.lower()}/{repo['name'].lower()}"
 
     if gitea_repos:
         # Classify existing Gitea repos by health
-        healthy_names: Set[str] = set()
-        for name, info in gitea_repos.items():
+        healthy_keys: Set[str] = set()
+        for key, info in gitea_repos.items():
             if info.get("mirror") and info.get("empty"):
-                broken_names.add(name)
+                broken_keys.add(key)
             else:
-                healthy_names.add(name)
+                healthy_keys.add(key)
 
-        # Layer 1: Auto-repair broken mirrors (delete empty shells)
-        if broken_names:
-            logger.info(T["broken_found"].format(len(broken_names)))
+        # Handle FORCE_RECREATE
+        if force_recreate:
+            for repo in final_repos:
+                key = _get_expected_key(repo)
+                if key in healthy_keys:
+                    healthy_keys.remove(key)
+                    broken_keys.add(key)
+
+        # Layer 1: Auto-repair broken mirrors (delete empty shells or force recreate)
+        if broken_keys:
+            logger.info(T["broken_found"].format(len(broken_keys)))
             logger.info(T["broken_repairing"])
             repaired = 0
-            for name in sorted(broken_names):
-                if delete_gitea_repo(gitea_url, gitea_token, gitea_user, name, logger):
-                    logger.info(T["broken_deleted"].format(name))
+            for key in sorted(broken_keys):
+                info = gitea_repos.get(key)
+                owner = info["owner"] if info else key.split("/")[0]
+                name = info["name"] if info else key.split("/")[1]
+                if delete_gitea_repo(gitea_url, gitea_token, owner, name, logger):
+                    logger.info(T["broken_deleted"].format(f"{owner}/{name}"))
                     repaired += 1
                 else:
-                    logger.warning(T["broken_delete_fail"].format(name))
+                    logger.warning(T["broken_delete_fail"].format(f"{owner}/{name}"))
             if repaired:
                 logger.info(T["broken_repaired"].format(repaired))
 
         # Filter: skip healthy repos, keep broken ones for re-migration
-        github_names = {r["name"] for r in final_repos}
-        new_count = len(github_names - set(gitea_repos.keys()))
+        new_count = 0
+        new_final_repos = []
+        for repo in final_repos:
+            key = _get_expected_key(repo)
+            if key in healthy_keys:
+                if sync_now and not args.dry_run:
+                    # Trigger mirror sync
+                    owner = gitea_repos[key]["owner"]
+                    name = gitea_repos[key]["name"]
+                    sync_url = f"{gitea_url}/api/v1/repos/{owner}/{name}/mirror-sync"
+                    req = urllib.request.Request(sync_url, method="POST")
+                    req.add_header("Authorization", f"token {gitea_token}")
+                    req.add_header("User-Agent", f"gitea-github-mirror/{VERSION}")
+                    try:
+                        with urllib.request.urlopen(req, timeout=15):
+                            logger.info(f"🔄 Triggered immediate sync for existing mirror: {owner}/{name}")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Failed to trigger sync for {owner}/{name}: {e}")
+            else:
+                new_final_repos.append(repo)
+                if key not in broken_keys:
+                    new_count += 1
+
         before_count = len(final_repos)
-        final_repos = [r for r in final_repos if r["name"] not in healthy_names]
+        final_repos = new_final_repos
         skipped = before_count - len(final_repos)
         logger.info(
             T["incremental_summary"].format(
-                len(gitea_repos), len(healthy_names), len(broken_names), new_count
+                len(gitea_repos), len(healthy_keys), len(broken_keys), new_count
             )
         )
-        _print_repo_status(logger, selected_repos, gitea_repos, broken_names, lang)
+        _print_repo_status(logger, selected_repos, gitea_repos, broken_keys, lang, gitea_user, preserve_orgs)
 
     if args.dry_run:
         logger.info(T["dry_run_diff"].format(len(final_repos), skipped))
