@@ -105,6 +105,44 @@ docker run -d --name gitea-mirror \
   ghcr.io/yuanweize/gitea-github-mirror:latest
 ```
 
+### 方式四：GitHub Actions（推荐全自动无人值守）
+
+**无需任何服务器。** GitHub 按计划自动运行脚本。
+
+1. **Fork 或克隆**本仓库到您的 GitHub 账号
+2. **添加 Secrets：** 进入仓库 `Settings → Secrets and variables → Actions → New repository secret`
+
+   | Secret 名称 | 值 |
+   |-------------|----|
+   | `GITEA_URL` | `https://git.example.com` |
+   | `GITEA_TOKEN` | 您的 Gitea API 令牌 |
+   | `GITEA_USER` | 您的 Gitea 用户名 |
+   | `MIRROR_GITHUB_TOKEN` | 您的 GitHub PAT（需要 `repo` 权限） |
+   | `GITHUB_USER` | 您的 GitHub 用户名 |
+   | `MIRROR_INTERVAL` | *（可选）* 如 `8h0m0s` |
+
+   > **⚠️ 注意：** GitHub Token 的 Secret 名称必须是 `MIRROR_GITHUB_TOKEN`（而非 `GITHUB_TOKEN`），因为 `GITHUB_TOKEN` 是 GitHub Actions 的保留变量。
+
+3. **运行方式：**
+   - **手动触发：** 进入 `Actions` 标签页 → `Mirror Sync` → `Run workflow`
+   - **自动运行：** 默认每周日 UTC 03:00 自动执行（可在工作流文件中自定义）
+
+4. **查看结果：** 每次运行后，报告和日志会作为**工作流 Artifacts** 上传（分别保留 30 天和 7 天）
+
+<details>
+<summary><strong>📝 自定义运行计划</strong></summary>
+
+编辑 `.github/workflows/mirror-sync.yml`，修改 cron 表达式：
+
+```yaml
+schedule:
+  - cron: "0 3 * * 0"    # 每周日 03:00 UTC — 默认
+  # - cron: "0 3 * * *"  # 每天 03:00 UTC
+  # - cron: "0 */6 * * *" # 每 6 小时
+```
+
+</details>
+
 ---
 
 ## ⚙️ 配置说明
@@ -214,7 +252,8 @@ gitea-github-mirror/
 │   └── report_20260527_134500.md
 └── .github/
     └── workflows/
-        └── docker-publish.yml   # CI/CD：自动构建并推送到 GHCR
+        ├── docker-publish.yml   # CI/CD：自动构建并推送到 GHCR
+        └── mirror-sync.yml      # 定时/手动执行镜像同步
 ```
 
 ---

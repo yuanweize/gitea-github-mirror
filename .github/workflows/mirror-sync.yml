@@ -1,0 +1,80 @@
+name: Mirror Sync
+
+on:
+  # Manual trigger from GitHub UI (Actions tab → Run workflow)
+  workflow_dispatch:
+    inputs:
+      include_orgs:
+        description: "Include org/collab repos"
+        type: boolean
+        default: false
+      workers:
+        description: "Concurrent workers"
+        type: number
+        default: 5
+      dry_run:
+        description: "Dry run (simulate only)"
+        type: boolean
+        default: false
+
+  # Scheduled trigger — runs every Sunday at 03:00 UTC
+  # Adjust cron expression to your preference:
+  #   '0 3 * * 0'   = weekly (Sunday 03:00)
+  #   '0 3 * * *'   = daily (03:00)
+  #   '0 */6 * * *' = every 6 hours
+  schedule:
+    - cron: "0 3 * * 0"
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120  # Safety limit for large accounts
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run mirror sync
+        env:
+          GITEA_URL: ${{ secrets.GITEA_URL }}
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+          GITEA_USER: ${{ secrets.GITEA_USER }}
+          GITHUB_TOKEN: ${{ secrets.MIRROR_GITHUB_TOKEN }}
+          GITHUB_USER: ${{ secrets.GITHUB_USER }}
+          MIRROR_INTERVAL: ${{ secrets.MIRROR_INTERVAL }}
+          MAX_WORKERS: ${{ github.event.inputs.workers || '5' }}
+          REQUEST_TIMEOUT: "600"
+          MAX_RETRIES: "3"
+          RETRY_DELAY: "10"
+          LOG_LEVEL: "INFO"
+          LANG_MIRROR: "en"
+        run: |
+          ARGS="--yes"
+          if [ "${{ github.event.inputs.include_orgs }}" = "true" ]; then
+            ARGS="$ARGS --include-orgs"
+          fi
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          python3 mirror.py $ARGS
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mirror-reports-${{ github.run_number }}
+          path: reports/
+          retention-days: 30
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mirror-logs-${{ github.run_number }}
+          path: logs/
+          retention-days: 7

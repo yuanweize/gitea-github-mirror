@@ -103,6 +103,44 @@ docker run -d --name gitea-mirror \
   ghcr.io/yuanweize/gitea-github-mirror:latest
 ```
 
+### Option 4: GitHub Actions (Recommended for hands-free automation)
+
+**No server needed.** GitHub runs the script for you on a schedule.
+
+1. **Fork or clone** this repo to your GitHub account
+2. **Add secrets** in your repo: `Settings → Secrets and variables → Actions → New repository secret`
+
+   | Secret Name | Value |
+   |-------------|-------|
+   | `GITEA_URL` | `https://git.example.com` |
+   | `GITEA_TOKEN` | Your Gitea API token |
+   | `GITEA_USER` | Your Gitea username |
+   | `MIRROR_GITHUB_TOKEN` | Your GitHub PAT with `repo` scope |
+   | `GITHUB_USER` | Your GitHub username |
+   | `MIRROR_INTERVAL` | *(Optional)* e.g. `8h0m0s` |
+
+   > **⚠️ Important:** The GitHub token secret is named `MIRROR_GITHUB_TOKEN` (not `GITHUB_TOKEN`) because `GITHUB_TOKEN` is reserved by GitHub Actions.
+
+3. **Run it:**
+   - **Manually:** Go to `Actions` tab → `Mirror Sync` → `Run workflow`
+   - **Automatically:** Runs every Sunday at 03:00 UTC by default (configurable in the workflow file)
+
+4. **View results:** Reports and logs are uploaded as **workflow artifacts** after each run (retained for 30 and 7 days respectively)
+
+<details>
+<summary><strong>📝 Customize the schedule</strong></summary>
+
+Edit `.github/workflows/mirror-sync.yml` and change the cron expression:
+
+```yaml
+schedule:
+  - cron: "0 3 * * 0"    # Weekly (Sunday 03:00 UTC) — default
+  # - cron: "0 3 * * *"  # Daily at 03:00 UTC
+  # - cron: "0 */6 * * *" # Every 6 hours
+```
+
+</details>
+
 ---
 
 ## ⚙️ Configuration
@@ -215,7 +253,8 @@ gitea-github-mirror/
 │   └── report_20260527_134500.md
 └── .github/
     └── workflows/
-        └── docker-publish.yml   # CI/CD: auto-build & push to GHCR
+        ├── docker-publish.yml   # CI/CD: auto-build & push to GHCR
+        └── mirror-sync.yml      # Scheduled/manual mirror execution
 ```
 
 ---
