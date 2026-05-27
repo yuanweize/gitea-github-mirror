@@ -7,7 +7,9 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://python.org)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg?logo=docker)](Dockerfile)
-[![GitHub Actions](https://img.shields.io/badge/CI-GitHub%20Actions-2088FF.svg?logo=github-actions)](https://github.com/yuanweize/gitea-github-mirror/actions)
+[![GHCR](https://img.shields.io/badge/GHCR-Package-purple.svg?logo=github)](https://github.com/yuanweize/Gitea-GitHub-Mirror/pkgs/container/gitea-github-mirror)
+[![GitHub Actions](https://img.shields.io/badge/CI-GitHub%20Actions-2088FF.svg?logo=github-actions)](https://github.com/yuanweize/Gitea-GitHub-Mirror/actions)
+[![Zero Dependencies](https://img.shields.io/badge/Deps-Zero-brightgreen.svg)](mirror.py)
 
 [English](#-overview) · [简体中文](README_CN.md)
 
@@ -42,18 +44,30 @@ Once configured, Gitea will **automatically sync** from GitHub on a schedule (de
 | 🐳 **Docker Ready** | Alpine-based image, Docker Compose, GitHub Actions CI/CD |
 | 🔐 **Secure by Design** | `.env` file for secrets, non-root Docker user |
 | 📁 **Auto-Rotation** | Old logs (max 30) and reports (max 50) automatically pruned |
+| ⚙️ **Graceful Shutdown** | Ctrl+C triggers clean exit — finishes in-flight tasks, generates report |
 | ⚡ **Zero Dependencies** | Pure Python 3 stdlib — no `pip install` needed |
+
+> **💡 v2.1.0 Highlights:** Atomic log output (no more interleaved lines), smart 451/DNS detection, graceful Ctrl+C shutdown.
 
 ---
 
 ## 🚀 Quick Start
 
+### 🚀 Which deployment is right for you?
+
+| Method | Best for | Server needed? |
+|--------|----------|----------------|
+| 🐍 [Python](#option-1-run-directly-recommended-for-first-time) | First-time / quick test | Any machine with Python 3 |
+| 🐳 [Docker Compose](#option-2-docker-compose-recommended-for-persistent-deployment) | Self-hosted persistent | Docker host |
+| 📦 [Docker CLI](#option-3-docker-one-liner) | One-off containerized run | Docker host |
+| ☁️ [GitHub Actions](#option-4-github-actions-recommended-for-hands-free-automation) | Fully automated, no server | None (free) |
+
 ### Option 1: Run Directly (Recommended for first-time use)
 
 ```bash
-# 1. Clone
-git clone https://github.com/yuanweize/gitea-github-mirror.git
-cd gitea-github-mirror
+# 1. Clone the project
+git clone https://github.com/yuanweize/Gitea-GitHub-Mirror.git
+cd Gitea-GitHub-Mirror
 
 # 2. Configure
 cp .env.example .env
@@ -475,13 +489,16 @@ This tool interacts with two REST APIs:
 |----------|----------|
 | **HTTP 201** | ✅ Success — only confirmed status |
 | **HTTP 409 (Conflict)** | ⏭️ Skip — repo already exists on Gitea |
-| **HTTP 403 (Forbidden)** | 🚫 Blocked — GitHub denied access (DMCA/TOS), skip without retry |
-| **HTTP 422 (Unprocessable)** | ❌ Fail immediately, no retry |
+| **HTTP 403 + "access blocked"** | 🚫 Blocked — GitHub denied access (DMCA/TOS), skip without retry |
+| **HTTP 403 (other)** | 🔄 Retry — could be transient auth/permission issue |
+| **HTTP 422 + DNS error** | 🔄 Retry — transient DNS resolution failure |
+| **HTTP 422 (other)** | ❌ Fail immediately, no retry |
+| **HTTP 5xx + "451" in body** | 🚫 Blocked — GitHub 451 wrapped by Gitea, skip without retry |
 | **HTTP 502/504 (Gateway)** | 🔄 Retry with exponential backoff (10s → 20s → 40s) |
 | **HTTP 5xx (other)** | 🔄 Retry with exponential backoff |
 | **Socket timeout** | 🔄 Retry with backoff |
 | **Connection refused** | 🔄 Retry with backoff |
-| **Ctrl+C** | Graceful exit |
+| **Ctrl+C** | ⚠️ Graceful shutdown — finishes in-flight tasks, generates report |
 
 ---
 

@@ -7,7 +7,9 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://python.org)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg?logo=docker)](Dockerfile)
-[![GitHub Actions](https://img.shields.io/badge/CI-GitHub%20Actions-2088FF.svg?logo=github-actions)](https://github.com/yuanweize/gitea-github-mirror/actions)
+[![GHCR](https://img.shields.io/badge/GHCR-Package-purple.svg?logo=github)](https://github.com/yuanweize/Gitea-GitHub-Mirror/pkgs/container/gitea-github-mirror)
+[![GitHub Actions](https://img.shields.io/badge/CI-GitHub%20Actions-2088FF.svg?logo=github-actions)](https://github.com/yuanweize/Gitea-GitHub-Mirror/actions)
+[![Zero Dependencies](https://img.shields.io/badge/Deps-Zero-brightgreen.svg)](mirror.py)
 
 [English](README.md) · **简体中文**
 
@@ -44,11 +46,23 @@
 | 🐳 **容器化** | Alpine Docker 镜像 + Docker Compose + GitHub Actions 自动构建 |
 | 🔐 **安全设计** | 敏感信息通过 `.env` 配置，Docker 非 root 用户运行 |
 | 📁 **自动轮转** | 日志（最多 30 个）和报告（最多 50 个）自动清理 |
+| ⚙️ **优雅关闭** | Ctrl+C 触发干净退出，完成当前任务后生成报告 |
 | ⚡ **零依赖** | 纯 Python 3 标准库，无需 `pip install` |
+
+> **💡 v2.1.0 亮点：** 原子化日志输出（不再出现交错行）、智能 451/DNS 检测、优雅 Ctrl+C 关闭。
 
 ---
 
 ## 🚀 快速开始
+
+### 🚀 哪种部署方式适合你？
+
+| 方式 | 适用场景 | 需要服务器？ |
+|------|----------|----------|
+| 🐍 [直接运行](#方式一直接运行推荐首次使用) | 首次使用 / 快速测试 | 任何有 Python 3 的机器 |
+| 🐳 [Docker Compose](#方式二docker-compose推荐持久化部署) | 自建服务器持久运行 | Docker 主机 |
+| 📦 [Docker 单行](#方式三docker-单行命令) | 一次性容器化运行 | Docker 主机 |
+| ☁️ [GitHub Actions](#方式四github-actions推荐全自动无人值守) | 全自动无服务器 | 无需（免费） |
 
 ### 方式一：直接运行（推荐首次使用）
 
@@ -390,13 +404,16 @@ sequenceDiagram
 |------|------|
 | **HTTP 201** | ✅ 成功——唯一确认状态 |
 | **HTTP 409 (冲突)** | ⏭️ 跳过——仓库已存在于 Gitea |
-| **HTTP 403 (禁止)** | 🚫 封锁——GitHub 拒绝访问 (DMCA/违规)，跳过不重试 |
-| **HTTP 422 (无法处理)** | ❌ 直接失败，不重试 |
+| **HTTP 403 + "访问封锁"** | 🚫 封锁——GitHub 拒绝访问 (DMCA/违规)，跳过不重试 |
+| **HTTP 403 (其他)** | 🔄 重试——可能是临时权限问题 |
+| **HTTP 422 + DNS 错误** | 🔄 重试——临时 DNS 解析失败 |
+| **HTTP 422 (其他)** | ❌ 直接失败，不重试 |
+| **HTTP 5xx + "含 451"** | 🚫 封锁——GitHub 451 被 Gitea 包装为 500，跳过不重试 |
 | **HTTP 502/504 (网关)** | 🔄 指数退避重试 (10s → 20s → 40s) |
 | **其他 HTTP 5xx** | 🔄 指数退避重试 |
 | **Socket 超时** | 🔄 退避重试 |
 | **连接被拒** | 🔄 退避重试 |
-| **Ctrl+C** | 优雅退出 |
+| **Ctrl+C** | ⚠️ 优雅关闭——完成当前任务后生成报告 |
 
 ---
 

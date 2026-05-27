@@ -38,6 +38,7 @@ import glob
 import json
 import logging
 import os
+import signal
 import socket
 import sys
 import threading
@@ -53,7 +54,7 @@ from typing import Any, Dict, List, Set
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 SCRIPT_DIR = Path(__file__).resolve().parent
 LOGS_DIR = SCRIPT_DIR / "logs"
 REPORTS_DIR = SCRIPT_DIR / "reports"
@@ -104,7 +105,7 @@ MESSAGES = {
         "success": "✅ Created ({:.1f}s)",
         "already_exists": "⏭️  Exists",
         "blocked": "🚫 Blocked (GitHub denied access)",
-        "retry": "   ⏳ Retry {}/{} in {}s ({})",
+        "retry": "⏳ Retry {}/{} in {}s ({})",
         "failed": "❌ FAILED: {}",
         "done": "\n🎉 Migration complete!",
         "report_header": "Execution Report",
@@ -160,7 +161,7 @@ MESSAGES = {
         "success": "✅ 已创建 ({:.1f}s)",
         "already_exists": "⏭️  已存在",
         "blocked": "🚫 已封锁 (GitHub 拒绝访问)",
-        "retry": "   ⏳ 第 {}/{} 次重试, 等待 {}s ({})",
+        "retry": "⏳ 第 {}/{} 次重试, 等待 {}s ({})",
         "failed": "❌ 失败: {}",
         "done": "\n🎉 迁移完成!",
         "report_header": "执行报告",
@@ -185,6 +186,7 @@ T = MESSAGES["en"]
 
 # Thread-safe print lock
 _print_lock = threading.Lock()
+_shutdown_event = threading.Event()
 
 Repo = Dict[str, Any]
 Result = Dict[str, Any]
@@ -598,14 +600,12 @@ def migrate_single_repo(
     repo_name = repo["name"]
     clone_url = repo["clone_url"]
     is_private = repo["private"]
+    prefix = f"[{index}/{total}] {repo_name}"
     start = time.time()
-
-    with _print_lock:
-        logger.info(T["mirroring"].format(index, total, repo_name))
 
     if dry_run:
         with _print_lock:
-            logger.info(T["dry_run_prefix"] + f"{clone_url} -> {gitea_user}/{repo_name}")
+            logger.info(f"{prefix} ... {T['dry_run_prefix']}{clone_url} -> {gitea_user}/{repo_name}")
         return {"name": repo_name, "status": "success", "duration": 0, "error": ""}
 
     payload = {
@@ -631,6 +631,11 @@ def migrate_single_repo(
     last_error = ""
 
     for attempt in range(1, max_retries + 1):
+        if _shutdown_event.is_set():
+            with _print_lock:
+                logger.warning(f"{prefix} ... ⚠️ Interrupted")
+            return {"name": repo_name, "status": "failed", "duration": time.time() - start, "error": "Interrupted by user"}
+
         req = urllib.request.Request(
             f"{gitea_url}/api/v1/repos/migrate",
             data=json.dumps(payload).encode("utf-8"),
@@ -645,7 +650,7 @@ def migrate_single_repo(
                 resp.read()
                 elapsed = time.time() - start
                 with _print_lock:
-                    logger.info(T["success"].format(elapsed))
+                    logger.info(f"{prefix} ... {T['success'].format(elapsed)}")
                 return {"name": repo_name, "status": "success", "duration": elapsed, "error": ""}
 
         except urllib.error.HTTPError as e:
@@ -658,7 +663,7 @@ def migrate_single_repo(
             # --- 409: Already exists → skip (no retry) ---
             if e.code == 409 or "already exists" in err_body.lower():
                 with _print_lock:
-                    logger.info(T["already_exists"])
+                    logger.info(f"{prefix} ... {T['already_exists']}")
                 return {
                     "name": repo_name,
                     "status": "skipped",
@@ -666,11 +671,15 @@ def migrate_single_repo(
                     "error": "",
                 }
 
-            # --- 403: GitHub blocked the repo (DMCA, TOS, etc.) → skip (no retry) ---
-            if e.code == 403 or ("403" in err_body and "access blocked" in err_body.lower()):
+            # --- Access blocked: body contains 451 or "access blocked" (Gitea may wrap as 500) ---
+            is_access_blocked = (
+                "access blocked" in err_body.lower()
+                or "451" in err_body
+            )
+            if is_access_blocked:
                 reason = _extract_error_message(err_body)
                 with _print_lock:
-                    logger.warning(T["blocked"] + f" — {reason}")
+                    logger.warning(f"{prefix} ... {T['blocked']} — {reason}")
                 return {
                     "name": repo_name,
                     "status": "blocked",
@@ -678,51 +687,78 @@ def migrate_single_repo(
                     "error": reason,
                 }
 
-            # --- 422: Invalid request → fail (no retry) ---
+            # --- 403 without access blocked → auth/permission issue, retry ---
+            if e.code == 403:
+                last_error = f"HTTP 403: {_extract_error_message(err_body)}"
+                if attempt < max_retries:
+                    wait = retry_delay * (2 ** (attempt - 1))
+                    with _print_lock:
+                        logger.warning(f"{prefix} ... {T['retry'].format(attempt, max_retries, wait, last_error)}")
+                    time.sleep(wait)
+                    continue
+                else:
+                    with _print_lock:
+                        logger.error(f"{prefix} ... {T['failed'].format(last_error)}")
+                    break
+
+            # --- 422: DNS failure (retryable) vs true validation error (hard fail) ---
             if e.code == 422:
                 reason = _extract_error_message(err_body)
-                last_error = f"HTTP 422: {reason}"
-                with _print_lock:
-                    logger.error(T["failed"].format(last_error))
-                return {
-                    "name": repo_name,
-                    "status": "failed",
-                    "duration": time.time() - start,
-                    "error": last_error,
-                }
+                if "could not resolve host" in err_body.lower() or "dns" in err_body.lower():
+                    last_error = f"HTTP 422 (DNS): {reason}"
+                    if attempt < max_retries:
+                        wait = retry_delay * (2 ** (attempt - 1))
+                        with _print_lock:
+                            logger.warning(f"{prefix} ... {T['retry'].format(attempt, max_retries, wait, last_error)}")
+                        time.sleep(wait)
+                        continue
+                    else:
+                        with _print_lock:
+                            logger.error(f"{prefix} ... {T['failed'].format(last_error)}")
+                        break
+                else:
+                    last_error = f"HTTP 422: {reason}"
+                    with _print_lock:
+                        logger.error(f"{prefix} ... {T['failed'].format(last_error)}")
+                    return {
+                        "name": repo_name,
+                        "status": "failed",
+                        "duration": time.time() - start,
+                        "error": last_error,
+                    }
 
             # --- 5xx / other: Retry with exponential backoff ---
             last_error = f"HTTP {e.code}: {_extract_error_message(err_body)}"
             if attempt < max_retries:
                 wait = retry_delay * (2 ** (attempt - 1))
                 with _print_lock:
-                    logger.warning(T["retry"].format(attempt, max_retries, wait, last_error))
+                    logger.warning(f"{prefix} ... {T['retry'].format(attempt, max_retries, wait, last_error)}")
                 time.sleep(wait)
             else:
                 with _print_lock:
-                    logger.error(T["failed"].format(last_error))
+                    logger.error(f"{prefix} ... {T['failed'].format(last_error)}")
 
         except (socket.timeout, urllib.error.URLError) as e:
             last_error = f"Network: {str(e)[:150]}"
             if attempt < max_retries:
                 wait = retry_delay * (2 ** (attempt - 1))
                 with _print_lock:
-                    logger.warning(T["retry"].format(attempt, max_retries, wait, last_error))
+                    logger.warning(f"{prefix} ... {T['retry'].format(attempt, max_retries, wait, last_error)}")
                 time.sleep(wait)
             else:
                 with _print_lock:
-                    logger.error(T["failed"].format(last_error))
+                    logger.error(f"{prefix} ... {T['failed'].format(last_error)}")
 
         except Exception as e:
             last_error = f"Unexpected: {str(e)[:150]}"
             if attempt < max_retries:
                 wait = retry_delay * (2 ** (attempt - 1))
                 with _print_lock:
-                    logger.warning(T["retry"].format(attempt, max_retries, wait, last_error))
+                    logger.warning(f"{prefix} ... {T['retry'].format(attempt, max_retries, wait, last_error)}")
                 time.sleep(wait)
             else:
                 with _print_lock:
-                    logger.error(T["failed"].format(last_error))
+                    logger.error(f"{prefix} ... {T['failed'].format(last_error)}")
 
     return {
         "name": repo_name,
@@ -864,7 +900,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    lang = args.lang or os.environ.get("LANG_MIRROR", "en")
+    lang = args.lang or os.environ.get("LANG_MIRROR", "cn")
     if lang not in ("en", "cn"):
         lang = "en"
     T = MESSAGES[lang]
@@ -989,12 +1025,22 @@ def main() -> None:
     start_time = time.time()
     all_results = []
 
+    # Register graceful shutdown handler (Ctrl+C)
+    _original_sigint = signal.getsignal(signal.SIGINT)
+    def _handle_sigint(sig, frame):
+        _shutdown_event.set()
+        with _print_lock:
+            logger.warning("\n⚠️  Shutdown signal received, finishing current tasks...")
+    signal.signal(signal.SIGINT, _handle_sigint)
+
     # Assign indices before submitting to thread pool
     indexed_repos = list(enumerate(final_repos, 1))
 
     with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="mirror") as pool:
         futures = {}
         for idx, repo in indexed_repos:
+            if _shutdown_event.is_set():
+                break
             future = pool.submit(
                 migrate_single_repo,
                 repo=repo,
@@ -1024,6 +1070,9 @@ def main() -> None:
                 all_results.append(
                     {"name": name, "status": "failed", "duration": 0, "error": str(e)}
                 )
+
+    # Restore original signal handler
+    signal.signal(signal.SIGINT, _original_sigint)
 
     total_duration = time.time() - start_time
 
