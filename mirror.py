@@ -564,19 +564,31 @@ def delete_gitea_repo(
     gitea_user: str,
     repo_name: str,
     logger: logging.Logger,
+    max_retries: int = 3,
 ) -> bool:
     """Delete a repo from Gitea. Returns True if deleted, False on error."""
     url = f"{gitea_url}/api/v1/repos/{gitea_user}/{repo_name}"
-    req = urllib.request.Request(url, method="DELETE")
-    req.add_header("Authorization", f"token {gitea_token}")
-    req.add_header("User-Agent", f"gitea-github-mirror/{VERSION}")
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            resp.read()
-        return True
-    except Exception as e:
-        logger.debug(f"Failed to delete {repo_name}: {e}")
-        return False
+    
+    for attempt in range(1, max_retries + 1):
+        req = urllib.request.Request(url, method="DELETE")
+        req.add_header("Authorization", f"token {gitea_token}")
+        req.add_header("User-Agent", f"gitea-github-mirror/{VERSION}")
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                resp.read()
+            return True
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return True  # Already deleted
+            if attempt < max_retries:
+                time.sleep(2 ** attempt)
+        except Exception as e:
+            if attempt < max_retries:
+                time.sleep(2 ** attempt)
+            else:
+                logger.debug(f"Failed to delete {repo_name} after {max_retries} attempts: {e}")
+
+    return False
 
 
 def cleanup_failed_migration(
@@ -587,6 +599,10 @@ def cleanup_failed_migration(
     logger: logging.Logger,
 ) -> bool:
     """Layer 2: After migration failure, check if Gitea created a broken shell and delete it."""
+    
+    # Wait briefly to let Gitea's internal clone process fail and release locks
+    time.sleep(2)
+    
     check_url = f"{gitea_url}/api/v1/repos/{gitea_user}/{repo_name}"
     req = urllib.request.Request(check_url)
     req.add_header("Authorization", f"token {gitea_token}")
