@@ -494,6 +494,7 @@ This tool interacts with two REST APIs:
 | **HTTP 403 (other)** | 🔄 Retry — could be transient auth/permission issue |
 | **HTTP 422 + DNS error** | 🔄 Retry — transient DNS resolution failure |
 | **HTTP 422 (other)** | ❌ Fail immediately, no retry |
+| **HTTP 429 (Rate Limit)**| 🔄 Retry with exponential backoff to respect limits |
 | **HTTP 5xx + "451" in body** | 🚫 Blocked — GitHub 451 wrapped by Gitea, skip without retry |
 | **HTTP 502/504 (Gateway)** | 🔄 Retry with exponential backoff (10s → 20s → 40s) |
 | **HTTP 5xx (other)** | 🔄 Retry with exponential backoff |
