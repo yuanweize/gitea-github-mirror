@@ -2,7 +2,7 @@
 
 # 🪞 Gitea GitHub Mirror
 
-**将您 GitHub 上的所有仓库批量镜像到自建 Gitea 服务器 — 全自动化。**
+**将您 GitHub 上的所有仓库批量镜像到自建 Gitea 服务器 — 并发执行、严格校验、结果可靠。**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://python.org)
@@ -13,7 +13,7 @@
 
 ---
 
-*一条命令，全部仓库，自动拉取镜像，灾备问题一步解决。* ✨
+*一条命令，全部仓库，多线程并发，严格 201 校验，零误报。* ✨
 
 </div>
 
@@ -33,14 +33,16 @@
 |------|------|
 | 🔍 **自动发现** | 通过 GitHub API 扫描所有仓库（个人 + 组织 + 协作者） |
 | 🪞 **拉取镜像** | 创建 Gitea Pull Mirror，定期自动从 GitHub 拉取更新 |
-| 🚀 **触发即走** | 采用 Fire-and-Forget 模式下发请求，彻底规避 Nginx 504 超时 |
+| ⚡ **多线程并发** | 可配置 `MAX_WORKERS` 线程数，N 个仓库同时迁移 |
+| ✅ **严格校验** | 只有 HTTP 201 = 成功，绝不猜测、绝不误报 |
+| 🚫 **封锁仓库检测** | 自动识别 GitHub 403（DMCA/违规）并清晰跳过 |
 | 🌍 **双语界面** | 完整的英文和简体中文界面支持 |
-| 🔄 **自动重试** | 瞬态错误自动指数退避重试（可配置次数和延迟） |
-| 📊 **执行报告** | 每次运行后自动生成 Markdown 格式的详细报告（含耗时、成功/失败统计） |
-| 📝 **结构化日志** | 控制台 + 日志文件双输出，带时间戳 |
+| 🔄 **自动重试** | 5xx 和网络错误自动指数退避重试 |
+| 📊 **执行报告** | 每次运行后生成 Markdown 报告（含并发统计、耗时、成功/失败明细） |
+| 📝 **结构化日志** | 线程安全的控制台 + 日志文件双输出 |
 | 🐳 **容器化** | Alpine Docker 镜像 + Docker Compose + GitHub Actions 自动构建 |
 | 🔐 **安全设计** | 敏感信息通过 `.env` 配置，Docker 非 root 用户运行 |
-| 📁 **自动轮转** | 日志（最多 30 个）和报告（最多 50 个）自动清理，防止磁盘溢出 |
+| 📁 **自动轮转** | 日志（最多 30 个）和报告（最多 50 个）自动清理 |
 | ⚡ **零依赖** | 纯 Python 3 标准库，无需 `pip install` |
 
 ---
@@ -124,10 +126,10 @@ docker run -d --name gitea-mirror \
 | 变量名 | 默认值 | 说明 |
 |--------|--------|------|
 | `MIRROR_INTERVAL` | 服务器默认 | 同步间隔（如 `8h0m0s`） |
-| `REQUEST_TIMEOUT` | `15` | 单次 HTTP 请求超时秒数。故意设短——参见 [触发即走模式](#-触发即走-fire-and-forget-模式) |
-| `MAX_RETRIES` | `3` | 每个仓库的最大重试次数 |
-| `RETRY_DELAY` | `5` | 初始重试延迟（秒），采用指数退避 |
-| `DISPATCH_DELAY` | `0.5` | 连续请求间的延迟（秒） |
+| `MAX_WORKERS` | `5` | 并发工作线程数，每个线程独立等待 HTTP 201 |
+| `REQUEST_TIMEOUT` | `600` | 单次 HTTP 请求超时秒数，必须足以覆盖最大仓库的克隆时间 |
+| `MAX_RETRIES` | `3` | 每个仓库的最大重试次数（仅对瞬态错误） |
+| `RETRY_DELAY` | `10` | 初始重试延迟（秒），指数退避 (10s → 20s → 40s) |
 | `LOG_LEVEL` | `INFO` | 日志级别：`DEBUG`、`INFO`、`WARNING`、`ERROR` |
 | `REPORT_MAX_COUNT` | `50` | 最大报告存档数量，超出自动清理旧报告 |
 | `LANG_MIRROR` | `en` | 界面语言：`en` 或 `cn` |
@@ -169,7 +171,8 @@ docker run -d --name gitea-mirror \
   --yes, -y             跳过所有确认提示，全自动执行
   --include-orgs        包含组织和协作者仓库
   --dry-run             模拟运行，不实际调用 Gitea API
-  --timeout SECONDS     自定义 HTTP 请求超时时间（秒，默认 15）
+  --workers N           并发工作线程数（默认 5）
+  --timeout SECONDS     HTTP 请求超时时间（秒，默认 600）
 ```
 
 ### 使用示例
@@ -187,8 +190,8 @@ python3 mirror.py --lang cn --yes --include-orgs
 # 模拟运行——预览操作，不实际请求 Gitea
 python3 mirror.py --lang cn --dry-run
 
-# 自定义超时（适用于没有反向代理的服务器）
-python3 mirror.py --lang cn --timeout 120
+# 10 个并发线程，更长超时
+python3 mirror.py --lang cn --workers 10 --timeout 900
 ```
 
 ---
@@ -216,33 +219,42 @@ gitea-github-mirror/
 
 ---
 
-## 🔥 触发即走 (Fire-and-Forget) 模式
+## ⚡ 并发模型
 
-这是本工具最核心的设计决策。
+这是本工具最核心的架构设计。
 
 ### 问题背景
 
-当您通过 `POST /api/v1/repos/migrate` 向 Gitea 发送镜像请求时，Gitea 会在 HTTP 请求期间开始执行 `git clone`。对于 Commit 历史较长或体积较大的仓库，克隆时间可能超过反向代理（Nginx/Caddy/Traefik）的超时限制（通常 60 秒），导致返回 `504 Gateway Timeout`。
+Gitea 的迁移 API（`POST /api/v1/repos/migrate`）是**同步阻塞**的——只有当完整的 `git clone` 完成后才会返回 HTTP 201。对于大型仓库，这可能需要几分钟。如果用单线程顺序执行，200 个仓库可能需要数小时。
 
-### 关键事实
+### 解决方案：多线程工作池
 
-**Gitea 的后台协程队列已经接受了任务。** 即使 HTTP 连接被 Nginx 切断，克隆操作仍会在 Gitea 服务器后台继续执行，并最终成功完成。504 是一个"假报错"。
+本工具不会猜测结果或掩盖超时错误，而是通过**严格校验 + 并发执行**来解决速度问题：
 
-### 本工具的解决方案
+- `ThreadPoolExecutor`（默认 5 个工作线程）并行处理仓库
+- 每个线程独立发送请求并**等待完整的 HTTP 201 响应**
+- 只有确认的 `201 Created` 才算成功——绝不猜测、绝不误报
+- 5 个线程 × 600s 超时 = 5 个仓库在 Gitea 服务器上同时克隆
 
-使用短 HTTP 超时（默认 15 秒），快速下发请求，将耗时的下载工作全部甩给 Gitea 后台处理：
+```
+线程 1: ████████████████ repo-A (201 ✅ 45s)
+线程 2: ██████████████████████████ repo-B (201 ✅ 120s)
+线程 3: ████████ repo-C (409 ⏭️ 已存在)
+线程 4: ████████████████████ repo-D (201 ✅ 80s)
+线程 5: ██ repo-E (403 🚫 封锁)
+```
 
-| HTTP 响应 | 处理策略 | 含义 |
-|-----------|----------|------|
-| `201 Created` | ✅ 确认创建 | API 在超时内返回了成功响应 |
-| `504 Gateway Timeout` | 📨 已下发 | Nginx 超时，但 Gitea 后台正在处理 |
-| `502 Bad Gateway` | 📨 已下发 | 同上 |
-| `Socket Timeout` | 📨 已下发 | Python 层面超时，请求已到达服务器 |
-| `409 Conflict` | ⚠️ 已存在 | 仓库已经在 Gitea 上了，跳过 |
-| `422 Unprocessable` | ❌ 失败 | 请求无效（如仓库名非法），不重试 |
-| 其他 `5xx` | 🔄 重试 | 指数退避重试（5s → 10s → 20s） |
+### Nginx 超时配置
 
-**效果：** 196 个仓库的请求下发可在 **~2 分钟** 内完成，而非之前同步等待的 30 分钟以上。
+如果您的 Gitea 在 Nginx 后面，您**必须**增加代理超时时间以匹配：
+
+```nginx
+location / {
+    proxy_read_timeout 600s;
+    proxy_connect_timeout 60s;
+    proxy_send_timeout 600s;
+}
+```
 
 ---
 
@@ -253,7 +265,7 @@ sequenceDiagram
     participant 用户
     participant 脚本 as mirror.py
     participant GitHub as GitHub API
-    participant Gitea as Gitea API
+    participant 服务器 as Gitea API
 
     用户->>脚本: python3 mirror.py --lang cn
     脚本->>GitHub: GET /user/repos (分页获取)
@@ -261,17 +273,22 @@ sequenceDiagram
     脚本->>用户: 展示分类仓库清单
     用户->>脚本: 确认选择
 
-    loop 对每个选中的仓库 (触发即走)
-        脚本->>Gitea: POST /api/v1/repos/migrate
-        alt 201 创建成功
-            Gitea-->>脚本: ✅ 确认
-        else 504 / 超时
-            Note over 脚本,Gitea: Gitea 后台正在克隆
-            脚本-->>脚本: 📨 标记为已下发
-        else 409 冲突
-            Gitea-->>脚本: ⚠️ 已存在
-        end
-        Note over 脚本: 等待 0.5 秒 → 下一个
+    par 工作线程池 (N 个线程)
+        脚本->>服务器: POST /repos/migrate (repo-A)
+        脚本->>服务器: POST /repos/migrate (repo-B)
+        脚本->>服务器: POST /repos/migrate (repo-C)
+    end
+
+    Note over 脚本,服务器: 每个线程独立等待完整的 201 响应
+
+    alt 201 创建成功
+        服务器-->>脚本: ✅ 确认（克隆完成）
+    else 409 冲突
+        服务器-->>脚本: ⏭️ 已存在
+    else 403 封锁
+        服务器-->>脚本: 🚫 GitHub 拒绝访问
+    else 5xx / 超时
+        脚本->>脚本: 🔄 指数退避重试
     end
 
     脚本->>脚本: 生成 Markdown 报告
@@ -299,8 +316,8 @@ sequenceDiagram
 # 📊 执行报告
 
 **日期:** 2026-05-27 14:30:00
-**版本:** v1.1.0
-**模式:** Fire-and-Forget (异步下发)
+**版本:** v2.0.0
+**模式:** 并发同步 (Multi-threaded)
 
 ## 汇总
 
@@ -308,11 +325,9 @@ sequenceDiagram
 |----------------|--------|
 | 处理仓库总数   | 196    |
 | 确认创建成功   | 180    |
-| 已下发(后台中) | 12     |
-| 已存在(跳过)   | 2      |
-| 失败           | 2      |
-| 总耗时         | 1m 48s |
-| 平均每仓库     | 0.6s   |
+| 已存在(跳过)   | 12     |
+| 失败           | 4      |
+| 总耗时         | 8m 12s |
 
 ## ❌ 失败仓库列表
 
@@ -327,14 +342,14 @@ sequenceDiagram
 
 | 场景 | 行为 |
 |------|------|
-| **HTTP 504 (网关超时)** | 视为"已下发"——Gitea 后台正在克隆 |
-| **HTTP 502 (网关错误)** | 视为"已下发"——同上 |
-| **Socket 超时** | 视为"已下发"——请求已到达服务器 |
-| **其他 HTTP 5xx** | 指数退避重试（5s → 10s → 20s） |
-| **HTTP 429 (速率限制)** | 退避重试 |
-| **HTTP 409 (冲突)** | 静默跳过，计入"已存在" |
-| **HTTP 422 (无法处理)** | 直接判定失败，不重试 |
-| **连接被拒** | 退避重试 |
+| **HTTP 201** | ✅ 成功——唯一确认状态 |
+| **HTTP 409 (冲突)** | ⏭️ 跳过——仓库已存在于 Gitea |
+| **HTTP 403 (禁止)** | 🚫 封锁——GitHub 拒绝访问 (DMCA/违规)，跳过不重试 |
+| **HTTP 422 (无法处理)** | ❌ 直接失败，不重试 |
+| **HTTP 502/504 (网关)** | 🔄 指数退避重试 (10s → 20s → 40s) |
+| **其他 HTTP 5xx** | 🔄 指数退避重试 |
+| **Socket 超时** | 🔄 退避重试 |
+| **连接被拒** | 🔄 退避重试 |
 | **Ctrl+C** | 优雅退出 |
 
 ---

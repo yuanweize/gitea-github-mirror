@@ -2,7 +2,7 @@
 
 # 🪞 Gitea GitHub Mirror
 
-**Bulk mirror all your GitHub repositories to a self-hosted Gitea instance — fully automated.**
+**Bulk mirror all your GitHub repositories to a self-hosted Gitea instance — concurrent, strict, reliable.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://python.org)
@@ -13,7 +13,7 @@
 
 ---
 
-*One command. All repos. Automatic pull-mirror. Disaster recovery solved.* ✨
+*One command. All repos. Concurrent workers. Strict 201 validation. Zero false positives.* ✨
 
 </div>
 
@@ -31,14 +31,16 @@ Once configured, Gitea will **automatically sync** from GitHub on a schedule (de
 |---------|-------------|
 | 🔍 **Auto-Discovery** | Scans all repos via GitHub API (owner + org + collaborator) |
 | 🪞 **Pull Mirror** | Creates Gitea pull-mirrors that auto-sync periodically |
-| 🚀 **Fire-and-Forget** | Dispatches requests without blocking on large repo clones — avoids Nginx 504 timeouts |
+| ⚡ **Concurrent Workers** | Multi-threaded execution (configurable `MAX_WORKERS`) — N repos migrate in parallel |
+| ✅ **Strict Validation** | Only HTTP 201 = success. No guessing, no false positives |
+| 🚫 **Blocked Repo Detection** | Auto-detects GitHub 403 (DMCA/TOS) and skips cleanly |
 | 🌍 **Bilingual i18n** | Full English and 简体中文 interface |
-| 🔄 **Retry + Backoff** | Exponential backoff on transient errors (configurable) |
-| 📊 **Execution Reports** | Markdown reports with timing metrics, auto-archived |
-| 📝 **Structured Logging** | Dual output: colored console + timestamped log files |
+| 🔄 **Retry + Backoff** | Exponential backoff on 5xx and network errors |
+| 📊 **Execution Reports** | Markdown reports with timing, concurrency stats, auto-archived |
+| 📝 **Structured Logging** | Thread-safe dual output: console + timestamped log files |
 | 🐳 **Docker Ready** | Alpine-based image, Docker Compose, GitHub Actions CI/CD |
 | 🔐 **Secure by Design** | `.env` file for secrets, non-root Docker user |
-| 📁 **Auto-Rotation** | Old logs (max 30) and reports (max 50) are automatically pruned |
+| 📁 **Auto-Rotation** | Old logs (max 30) and reports (max 50) automatically pruned |
 | ⚡ **Zero Dependencies** | Pure Python 3 stdlib — no `pip install` needed |
 
 ---
@@ -122,10 +124,10 @@ All configuration is done via environment variables. Copy `.env.example` to `.en
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MIRROR_INTERVAL` | Server default | Sync interval (e.g., `8h0m0s`) |
-| `REQUEST_TIMEOUT` | `15` | HTTP timeout per request (seconds). Short by design — see [Fire-and-Forget](#-fire-and-forget-pattern) |
-| `MAX_RETRIES` | `3` | Max retry attempts per repo |
-| `RETRY_DELAY` | `5` | Initial retry delay (seconds), exponential backoff |
-| `DISPATCH_DELAY` | `0.5` | Delay between consecutive dispatches (seconds) |
+| `MAX_WORKERS` | `5` | Concurrent worker threads. Each waits for full HTTP 201 |
+| `REQUEST_TIMEOUT` | `600` | HTTP timeout per request (seconds). Must cover the largest repo clone time |
+| `MAX_RETRIES` | `3` | Max retry attempts per repo on transient errors |
+| `RETRY_DELAY` | `10` | Initial retry delay (seconds), exponential backoff |
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `REPORT_MAX_COUNT` | `50` | Max archived reports before auto-rotation |
 | `LANG_MIRROR` | `en` | UI language: `en` or `cn` |
@@ -157,9 +159,10 @@ All configuration is done via environment variables. Copy `.env.example` to `.en
 ## 📋 CLI Usage
 
 ```
-usage: mirror.py [-h] [--lang {en,cn}] [--yes] [--include-orgs] [--dry-run] [--timeout SECONDS]
+usage: mirror.py [-h] [--lang {en,cn}] [--yes] [--include-orgs] [--dry-run]
+                 [--workers N] [--timeout SECONDS]
 
-Bulk mirror all GitHub repositories to a self-hosted Gitea instance.
+Bulk mirror all GitHub repos to Gitea (concurrent, strict).
 
 options:
   -h, --help            show this help message and exit
@@ -167,7 +170,8 @@ options:
   --yes, -y             Skip all confirmation prompts
   --include-orgs        Include organization & collaborator repos
   --dry-run             Simulate without making any API calls to Gitea
-  --timeout SECONDS     HTTP request timeout in seconds (default: 15)
+  --workers N           Concurrent worker threads (default: 5)
+  --timeout SECONDS     HTTP request timeout in seconds (default: 600)
 ```
 
 ### Examples
@@ -188,8 +192,8 @@ python3 mirror.py --yes --include-orgs --lang cn
 # Dry run — preview what would happen without touching Gitea
 python3 mirror.py --dry-run
 
-# Custom timeout (e.g. for servers without reverse proxy)
-python3 mirror.py --timeout 120
+# 10 concurrent workers with longer timeout
+python3 mirror.py --workers 10 --timeout 900
 ```
 
 ---
@@ -216,30 +220,42 @@ gitea-github-mirror/
 
 ---
 
-## 🚀 Fire-and-Forget Pattern
+## ⚡ Concurrency Model
 
-A core design decision of this tool. Here's why and how:
+A core architectural decision of this tool.
 
 ### The Problem
 
-When you create a pull-mirror via `POST /api/v1/repos/migrate`, Gitea starts cloning the source repo **during the HTTP request**. For large repositories with extensive commit history, this can take minutes. If your Gitea sits behind a reverse proxy (Nginx, Caddy, Traefik, etc.), the proxy will typically enforce a 60-second timeout and return a `504 Gateway Timeout` error.
+Gitea's migration API (`POST /api/v1/repos/migrate`) is **synchronous** — it only returns HTTP 201 after the full `git clone` completes. For large repos this can take minutes. A sequential script would take hours for 200 repos.
 
-**But Gitea has already accepted the task!** It spawns a background goroutine to continue cloning even after the HTTP connection is severed. The mirror will be created successfully — the 504 is a false alarm.
+### The Solution: Multi-threaded Workers
 
-### The Solution
+Instead of guessing outcomes or masking timeouts, this tool uses **strict validation with concurrent execution**:
 
-This tool uses a **short HTTP timeout** (default: 15 seconds) and treats timeout responses as "dispatched":
+- A `ThreadPoolExecutor` (default: 5 workers) processes repos in parallel
+- Each worker independently sends a request and **waits for the full HTTP 201 response**
+- Only a confirmed `201 Created` counts as success — no guessing, no false positives
+- 5 workers × 600s timeout = 5 repos cloning simultaneously on the Gitea server
 
 ```
-HTTP 201 Created     → ✅ Confirmed created
-HTTP 504/502         → 📨 Dispatched (server processing in background)
-Socket timeout       → 📨 Dispatched (server processing in background)
-HTTP 409 Conflict    → ⚠️  Already exists, skipped
-HTTP 422             → ❌ Invalid request, failed
-Other 5xx            → 🔄 Retry with exponential backoff
+Worker 1: ████████████████ repo-A (201 ✅ 45s)
+Worker 2: ██████████████████████████ repo-B (201 ✅ 120s)
+Worker 3: ████████ repo-C (409 ⏭️ exists)
+Worker 4: ████████████████████ repo-D (201 ✅ 80s)
+Worker 5: ██ repo-E (403 🚫 blocked)
 ```
 
-This means 196 repos can be dispatched in under 2 minutes instead of 30+ minutes.
+### Nginx Timeout Configuration
+
+If your Gitea is behind Nginx, you **must** increase the proxy timeout to match:
+
+```nginx
+location / {
+    proxy_read_timeout 600s;
+    proxy_connect_timeout 60s;
+    proxy_send_timeout 600s;
+}
+```
 
 ---
 
@@ -258,17 +274,22 @@ sequenceDiagram
     Script->>User: Display categorized list
     User->>Script: Confirm selection
 
-    loop For each selected repo (fire-and-forget)
-        Script->>Gitea: POST /api/v1/repos/migrate
-        alt 201 Created
-            Gitea-->>Script: ✅ Confirmed
-        else 504 / Timeout
-            Note over Script,Gitea: Gitea cloning in background
-            Script-->>Script: 📨 Mark as dispatched
-        else 409 Conflict
-            Gitea-->>Script: ⚠️ Already exists
-        end
-        Note over Script: Wait 0.5s → next repo
+    par Worker Pool (N threads)
+        Script->>Gitea: POST /repos/migrate (repo-A)
+        Script->>Gitea: POST /repos/migrate (repo-B)
+        Script->>Gitea: POST /repos/migrate (repo-C)
+    end
+
+    Note over Script,Gitea: Each worker waits for full 201 response
+
+    alt 201 Created
+        Gitea-->>Script: ✅ Confirmed (clone complete)
+    else 409 Conflict
+        Gitea-->>Script: ⏭️ Already exists
+    else 403 Blocked
+        Gitea-->>Script: 🚫 GitHub denied access
+    else 5xx / Timeout
+        Script->>Script: 🔄 Retry with backoff
     end
 
     Script->>Script: Generate Markdown report
@@ -296,24 +317,30 @@ After each run, a Markdown report is generated in the `reports/` directory:
 # 📊 Execution Report
 
 **Date:** 2026-05-27 14:30:00
-**Version:** v1.1.0
-**Mode:** Fire-and-Forget (async dispatch)
+**Version:** v2.0.0
+**Mode:** Concurrent (strict synchronous per worker)
 
 ## Summary
 
-| Metric                  | Value  |
-|-------------------------|--------|
-| Total repos processed   | 196    |
-| Confirmed created       | 180    |
-| Dispatched (background) | 12     |
-| Already existed         | 2      |
-| Failed                  | 2      |
-| Total duration          | 1m 48s |
-| Avg time per repo       | 0.6s   |
+| Metric             | Value  |
+|--------------------|--------|
+| Total repos        | 196    |
+| Successfully created | 190  |
+| Already existed    | 3      |
+| Blocked by GitHub  | 1      |
+| Failed             | 2      |
+| Concurrent workers | 5      |
+| Request timeout    | 600s   |
+| Total duration     | 12m 5s |
+| Avg per repo       | 3.7s   |
+
+## 🚫 Blocked Repositories
+
+- `IBMYes`: 403 Repository access blocked
 
 ## ❌ Failed Repositories
 
-- `broken-repo`: HTTP 422: Unprocessable Entity
+- `huge-repo`: Network: timed out
 ```
 
 Reports are **auto-rotated**: when the count exceeds `REPORT_MAX_COUNT` (default 50), the oldest reports are automatically deleted to prevent disk overflow.
@@ -400,14 +427,14 @@ This tool interacts with two REST APIs:
 
 | Scenario | Behavior |
 |----------|----------|
-| **HTTP 504 (Gateway Timeout)** | Treated as "dispatched" — Gitea is cloning in background |
-| **HTTP 502 (Bad Gateway)** | Treated as "dispatched" — same rationale |
-| **Socket timeout** | Treated as "dispatched" — request was accepted |
-| **HTTP 5xx (other)** | Retry with exponential backoff (5s → 10s → 20s) |
-| **HTTP 429 (Rate limit)** | Retry with backoff |
-| **HTTP 409 (Conflict)** | Skip gracefully, count as "skipped" |
-| **HTTP 422 (Unprocessable)** | Fail immediately, no retry |
-| **Connection refused** | Retry with backoff |
+| **HTTP 201** | ✅ Success — only confirmed status |
+| **HTTP 409 (Conflict)** | ⏭️ Skip — repo already exists on Gitea |
+| **HTTP 403 (Forbidden)** | 🚫 Blocked — GitHub denied access (DMCA/TOS), skip without retry |
+| **HTTP 422 (Unprocessable)** | ❌ Fail immediately, no retry |
+| **HTTP 502/504 (Gateway)** | 🔄 Retry with exponential backoff (10s → 20s → 40s) |
+| **HTTP 5xx (other)** | 🔄 Retry with exponential backoff |
+| **Socket timeout** | 🔄 Retry with backoff |
+| **Connection refused** | 🔄 Retry with backoff |
 | **Ctrl+C** | Graceful exit |
 
 ---
