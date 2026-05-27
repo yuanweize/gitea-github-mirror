@@ -537,12 +537,20 @@ def fetch_gitea_repos(
             req.add_header("Accept", "application/json")
             req.add_header("User-Agent", f"gitea-github-mirror/{VERSION}")
 
-            try:
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-            except Exception as e:
-                logger.warning(f"⚠️ Failed to fetch {api_path}: {e}")
-                break
+            attempt = 1
+            max_retries = 3
+            data = None
+            while attempt <= max_retries:
+                try:
+                    with urllib.request.urlopen(req, timeout=30) as resp:
+                        data = json.loads(resp.read().decode("utf-8"))
+                        break
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to fetch {api_path} (page {page}, attempt {attempt}/{max_retries}): {e}")
+                    if attempt == max_retries:
+                        raise RuntimeError(f"Fatal error: Could not fetch {api_path} from Gitea after {max_retries} attempts. Aborting to prevent inconsistent state.")
+                    time.sleep(2**attempt)
+                    attempt += 1
 
             if not data:
                 break
@@ -577,12 +585,21 @@ def fetch_gitea_repos(
         req.add_header("Accept", "application/json")
         req.add_header("User-Agent", f"gitea-github-mirror/{VERSION}")
         
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-        except Exception:
-            break
-            
+        attempt = 1
+        max_retries = 3
+        data = None
+        while attempt <= max_retries:
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    break
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to fetch orgs (page {page}, attempt {attempt}/{max_retries}): {e}")
+                if attempt == max_retries:
+                    raise RuntimeError(f"Fatal error: Could not fetch orgs from Gitea after {max_retries} attempts.")
+                time.sleep(2**attempt)
+                attempt += 1
+                
         if not data:
             break
             
@@ -734,7 +751,7 @@ def _print_repo_status(
         repo_owner = gitea_user
         if preserve_orgs and r.get("owner") and r["owner"].get("type") == "Organization":
             repo_owner = r["owner"]["login"]
-        github_names.add(f"{repo_owner}/{r['name']}")
+        github_names.add(f"{repo_owner.lower()}/{r['name'].lower()}")
     github_only = sorted(github_names - gitea_names)
     both_healthy = sorted((github_names & gitea_names) - broken_names)
     both_broken = sorted(broken_names & github_names)
@@ -1111,6 +1128,26 @@ def generate_report(
     return report_file
 
 
+def trigger_mirror_sync(
+    gitea_url: str,
+    gitea_token: str,
+    repo_owner: str,
+    repo_name: str,
+    logger: logging.Logger,
+) -> None:
+    """Trigger an immediate mirror sync for an existing repository."""
+    sync_url = f"{gitea_url}/api/v1/repos/{repo_owner}/{repo_name}/mirror-sync"
+    req = urllib.request.Request(sync_url, method="POST")
+    req.add_header("Authorization", f"token {gitea_token}")
+    req.add_header("User-Agent", f"gitea-github-mirror/{VERSION}")
+    try:
+        with urllib.request.urlopen(req, timeout=15):
+            with _print_lock:
+                logger.info(f"🔄 Triggered immediate sync for existing mirror: {repo_owner}/{repo_name}")
+    except Exception as e:
+        with _print_lock:
+            logger.warning(f"⚠️ Failed to trigger sync for {repo_owner}/{repo_name}: {e}")
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -1313,22 +1350,14 @@ def main() -> None:
         # Filter: skip healthy repos, keep broken ones for re-migration
         new_count = 0
         new_final_repos = []
+        sync_tasks = []
         for repo in final_repos:
             key = _get_expected_key(repo)
             if key in healthy_keys:
                 if sync_now and not args.dry_run:
-                    # Trigger mirror sync
                     owner = gitea_repos[key]["owner"]
                     name = gitea_repos[key]["name"]
-                    sync_url = f"{gitea_url}/api/v1/repos/{owner}/{name}/mirror-sync"
-                    req = urllib.request.Request(sync_url, method="POST")
-                    req.add_header("Authorization", f"token {gitea_token}")
-                    req.add_header("User-Agent", f"gitea-github-mirror/{VERSION}")
-                    try:
-                        with urllib.request.urlopen(req, timeout=15):
-                            logger.info(f"🔄 Triggered immediate sync for existing mirror: {owner}/{name}")
-                    except Exception as e:
-                        logger.warning(f"⚠️ Failed to trigger sync for {owner}/{name}: {e}")
+                    sync_tasks.append((owner, name))
             else:
                 new_final_repos.append(repo)
                 if key not in broken_keys:
@@ -1365,6 +1394,25 @@ def main() -> None:
             logger.info("Ensuring Gitea organizations exist...")
             for org in sorted(orgs_to_create):
                 ensure_gitea_org(gitea_url, gitea_token, org, logger)
+
+    # Phase 4.8: Concurrent SYNC_NOW triggers
+    if sync_tasks and not args.dry_run:
+        logger.info(f"🚀 Triggering mirror sync for {len(sync_tasks)} existing repositories concurrently...")
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="sync") as pool:
+            sync_futures = [
+                pool.submit(
+                    trigger_mirror_sync,
+                    gitea_url,
+                    gitea_token,
+                    owner,
+                    name,
+                    logger,
+                )
+                for owner, name in sync_tasks
+            ]
+            for future in as_completed(sync_futures):
+                pass  # Exceptions are caught inside trigger_mirror_sync
+        logger.info("✅ All mirror sync triggers completed.")
 
     # Phase 5: Concurrent migration
     logger.info(T["starting"].format(max_workers, request_timeout))
