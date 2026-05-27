@@ -54,7 +54,7 @@ from typing import Any, Dict, List, Set
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-VERSION = "2.2.0"
+VERSION = "2.3.0"
 SCRIPT_DIR = Path(__file__).resolve().parent
 LOGS_DIR = SCRIPT_DIR / "logs"
 REPORTS_DIR = SCRIPT_DIR / "reports"
@@ -624,6 +624,60 @@ def cleanup_failed_migration(
     return False
 
 
+def ensure_gitea_org(
+    gitea_url: str,
+    gitea_token: str,
+    org_name: str,
+    logger: logging.Logger,
+) -> bool:
+    """Ensure a Gitea organization exists."""
+    check_url = f"{gitea_url}/api/v1/orgs/{org_name}"
+    req = urllib.request.Request(check_url)
+    req.add_header("Authorization", f"token {gitea_token}")
+    req.add_header("Accept", "application/json")
+    req.add_header("User-Agent", f"gitea-github-mirror/{VERSION}")
+
+    try:
+        with urllib.request.urlopen(req, timeout=15):
+            return True  # Org already exists
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            logger.warning(f"Failed to check org {org_name}: {e}")
+            return False
+    except Exception as e:
+        logger.warning(f"Failed to check org {org_name}: {e}")
+        return False
+
+    # Create the org
+    create_url = f"{gitea_url}/api/v1/orgs"
+    payload = {
+        "username": org_name,
+        "visibility": "public",
+    }
+    req = urllib.request.Request(
+        create_url,
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+    )
+    req.add_header("Authorization", f"token {gitea_token}")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("User-Agent", f"gitea-github-mirror/{VERSION}")
+
+    try:
+        with urllib.request.urlopen(req, timeout=15):
+            logger.info(f"Created missing Gitea organization: {org_name}")
+            return True
+    except urllib.error.HTTPError as e:
+        # 422 usually means already exists or invalid name
+        if e.code == 422:
+            return True
+        logger.warning(f"Failed to create org {org_name}: {e}")
+    except Exception as e:
+        logger.warning(f"Failed to create org {org_name}: {e}")
+
+    return False
+
+
 def _print_repo_status(
     logger: logging.Logger,
     github_repos: List[Repo],
@@ -686,6 +740,8 @@ def migrate_single_repo(
     github_token: str,
     mirror_interval: str,
     mirror_lfs: bool,
+    mirror_extras: bool,
+    preserve_orgs: bool,
     request_timeout: int,
     max_retries: int,
     retry_delay: int,
@@ -701,13 +757,19 @@ def migrate_single_repo(
     repo_name = repo["name"]
     clone_url = repo["clone_url"]
     is_private = repo["private"]
+
+    # Determine repo_owner based on PRESERVE_ORGS
+    repo_owner = gitea_user
+    if preserve_orgs and repo.get("owner") and repo["owner"].get("type") == "Organization":
+        repo_owner = repo["owner"]["login"]
+
     prefix = f"[{index}/{total}] {repo_name}"
     start = time.time()
 
     if dry_run:
         with _print_lock:
             logger.info(
-                f"{prefix} ... {T['dry_run_prefix']}{clone_url} -> {gitea_user}/{repo_name}"
+                f"{prefix} ... {T['dry_run_prefix']}{clone_url} -> {repo_owner}/{repo_name}"
             )
         return {"name": repo_name, "status": "success", "duration": 0, "error": ""}
 
@@ -716,15 +778,15 @@ def migrate_single_repo(
         "clone_addr": clone_url,
         "mirror": True,
         "repo_name": repo_name,
-        "repo_owner": gitea_user,
+        "repo_owner": repo_owner,
         "private": is_private,
         "service": "github",
-        "wiki": False,
-        "labels": False,
-        "issues": False,
-        "pull_requests": False,
-        "releases": False,
-        "milestones": False,
+        "wiki": mirror_extras,
+        "labels": mirror_extras,
+        "issues": mirror_extras,
+        "pull_requests": mirror_extras,
+        "releases": mirror_extras,
+        "milestones": mirror_extras,
     }
     if mirror_interval:
         payload["mirror_interval"] = mirror_interval
@@ -1081,12 +1143,24 @@ def main() -> None:
     max_workers = args.workers or int(os.environ.get("MAX_WORKERS", "5"))
     skip_repos_str = os.environ.get("SKIP_REPOS", "").strip()
     skip_repos = {r.strip() for r in skip_repos_str.split(",")} if skip_repos_str else set()
+    mirror_extras = os.environ.get("MIRROR_EXTRAS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    preserve_orgs = os.environ.get("PRESERVE_ORGS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
     # Phase 1: Fetch
     logger.info(T["fetching"])
     all_repos_raw = fetch_github_repos(github_token, logger)
     all_repos = [r for r in all_repos_raw if r["name"] not in skip_repos]
-    
+
     if skip_repos:
         skipped_count = len(all_repos_raw) - len(all_repos)
         if skipped_count > 0:
@@ -1185,6 +1259,18 @@ def main() -> None:
             logger.info(T["cancelled"])
             sys.exit(0)
 
+    # Phase 4.5: Ensure Organizations exist if preserving org structure
+    if preserve_orgs and not args.dry_run:
+        orgs_to_create = {
+            r["owner"]["login"]
+            for r in final_repos
+            if r.get("owner") and r["owner"].get("type") == "Organization"
+        }
+        if orgs_to_create:
+            logger.info("Ensuring Gitea organizations exist...")
+            for org in sorted(orgs_to_create):
+                ensure_gitea_org(gitea_url, gitea_token, org, logger)
+
     # Phase 5: Concurrent migration
     logger.info(T["starting"].format(max_workers, request_timeout))
     start_time = time.time()
@@ -1219,6 +1305,8 @@ def main() -> None:
                 github_token=github_token,
                 mirror_interval=mirror_interval,
                 mirror_lfs=mirror_lfs,
+                mirror_extras=mirror_extras,
+                preserve_orgs=preserve_orgs,
                 request_timeout=request_timeout,
                 max_retries=max_retries,
                 retry_delay=retry_delay,

@@ -16,6 +16,14 @@ on:
         description: "Comma-separated repos to skip (e.g. repo1,repo2)"
         type: string
         default: ""
+      mirror_extras:
+        description: "Migrate issues, wiki, releases, labels"
+        type: boolean
+        default: true
+      preserve_orgs:
+        description: "Preserve GitHub organization structure"
+        type: boolean
+        default: true
       dry_run:
         description: "Dry run (simulate only)"
         type: boolean
@@ -55,6 +63,8 @@ jobs:
           GITHUB_USER: ${{ secrets.GITHUB_USER }}
           MIRROR_INTERVAL: ${{ secrets.MIRROR_INTERVAL }}
           SKIP_REPOS: ${{ github.event.inputs.skip_repos || secrets.SKIP_REPOS }}
+          MIRROR_EXTRAS: ${{ github.event.inputs.mirror_extras || secrets.MIRROR_EXTRAS }}
+          PRESERVE_ORGS: ${{ github.event.inputs.preserve_orgs || secrets.PRESERVE_ORGS }}
           MAX_WORKERS: ${{ github.event.inputs.workers || '5' }}
           REQUEST_TIMEOUT: "600"
           MAX_RETRIES: "3"

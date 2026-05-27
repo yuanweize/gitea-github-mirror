@@ -135,6 +135,8 @@ docker run -d --name gitea-mirror \
    | `GITHUB_USER` | Your GitHub username |
    | `SKIP_REPOS` | Comma-separated list of repository names to strictly ignore |
    | `MIRROR_INTERVAL` | Synchronization interval (e.g. `8h0m0s`) |
+   | `MIRROR_EXTRAS` | Set to `true` to migrate issues, wiki, labels, releases, and milestones |
+   | `PRESERVE_ORGS` | Set to `true` to automatically recreate GitHub organizations in Gitea |
 
    > **⚠️ Important:** The GitHub token secret is named `MIRROR_GITHUB_TOKEN` (not `GITHUB_TOKEN`) because `GITHUB_TOKEN` is reserved by GitHub Actions.
 

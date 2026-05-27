@@ -137,6 +137,8 @@ docker run -d --name gitea-mirror \
    | `GITHUB_USER` | 您的 GitHub 用户名 |
    | `SKIP_REPOS` | 以逗号分隔的忽略仓库名列表 (例如 `repo1,repo2`) |
    | `MIRROR_INTERVAL` | *(可选)* 如 `8h0m0s` |
+   | `MIRROR_EXTRAS` | *(可选)* 设为 `true` 以同步 Issues、Wiki、标签和发布版 |
+   | `PRESERVE_ORGS` | *(可选)* 设为 `true` 以自动在 Gitea 重建 GitHub 组织架构 |
 
    > **⚠️ 注意：** GitHub Token 的 Secret 名称必须是 `MIRROR_GITHUB_TOKEN`（而非 `GITHUB_TOKEN`），因为 `GITHUB_TOKEN` 是 GitHub Actions 的保留变量。
 
