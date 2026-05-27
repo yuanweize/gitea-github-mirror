@@ -32,7 +32,8 @@ Once configured, Gitea will **automatically sync** from GitHub on a schedule (de
 | Feature | Description |
 |---------|-------------|
 | 🔍 **Auto-Discovery** | Scans all repos via GitHub API (owner + org + collaborator) |
-| 🧮 **Incremental Sync** | Skips repos that already exist on Gitea to reduce API load |
+| 🧲 **Incremental Sync** | Skips healthy repos on Gitea; auto-repairs broken mirrors |
+| 🔧 **Mirror Health Check** | Detects empty shells from failed migrations and auto-deletes them |
 | 🪞 **Pull Mirror** | Creates Gitea pull-mirrors that auto-sync periodically |
 | ⚡ **Concurrent Workers** | Multi-threaded execution (configurable `MAX_WORKERS`) — N repos migrate in parallel |
 | ✅ **Strict Validation** | Only HTTP 201 = success. No guessing, no false positives |
@@ -47,7 +48,7 @@ Once configured, Gitea will **automatically sync** from GitHub on a schedule (de
 | ⚙️ **Graceful Shutdown** | Ctrl+C triggers clean exit — finishes in-flight tasks, generates report |
 | ⚡ **Zero Dependencies** | Pure Python 3 stdlib — no `pip install` needed |
 
-> **💡 v2.1.0 Highlights:** Atomic log output (no more interleaved lines), smart 451/DNS detection, graceful Ctrl+C shutdown.
+> **💡 v2.2.0 Highlights:** Mirror health check with auto-repair for broken shells, post-failure cleanup to prevent ghost repos.
 
 ---
 
@@ -499,6 +500,22 @@ This tool interacts with two REST APIs:
 | **Socket timeout** | 🔄 Retry with backoff |
 | **Connection refused** | 🔄 Retry with backoff |
 | **Ctrl+C** | ⚠️ Graceful shutdown — finishes in-flight tasks, generates report |
+| **Post-failure** | 🧹 Auto-cleanup — deletes broken shell if Gitea created one before clone failed |
+
+### 🔧 Mirror Health Check (v2.2.0)
+
+Gitea's migration API creates the database record **before** starting `git clone`. If the clone fails (DNS, timeout, DMCA 451), the repo record persists as a broken empty shell. This causes two problems:
+
+1. The script reports "failed" but the repo exists on Gitea
+2. On re-run, the script sees "already exists" and skips it forever
+
+**v2.2.0 solves this with a 3-layer defense:**
+
+| Layer | When | What |
+|-------|------|------|
+| **Layer 1** | Before migration | Scans Gitea for `mirror=true AND empty=true` repos and auto-deletes them |
+| **Layer 2** | After migration fails | Checks if Gitea created a broken shell and immediately deletes it |
+| **Layer 3** | After migration succeeds | Confirms `201` response (existing strict validation) |
 
 ---
 

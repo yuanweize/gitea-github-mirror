@@ -54,7 +54,7 @@ from typing import Any, Dict, List, Set
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 SCRIPT_DIR = Path(__file__).resolve().parent
 LOGS_DIR = SCRIPT_DIR / "logs"
 REPORTS_DIR = SCRIPT_DIR / "reports"
@@ -84,12 +84,19 @@ MESSAGES = {
         "fetch_gitea_fail": (
             "\n⚠️  Failed to fetch Gitea repos. Continuing without incremental skip. Error: {}"
         ),
-        "incremental_summary": "\n🧮 Incremental sync: {} existing on Gitea, {} will be skipped.",
+        "incremental_summary_legacy": "\n🧮 Incremental sync: {} existing on Gitea, {} will be skipped.",
         "status_header": "\n📋 Repo status (GitHub selection vs Gitea)",
         "status_legend": "Legend: {} GitHub-only  {} In both  {} Gitea-only",
         "status_github_only": "GitHub-only",
-        "status_both": "In both",
-        "status_gitea_only": "Gitea-only",
+        "status_both": "In both (healthy)",
+        "status_broken": "🔧 Broken mirror (empty)",
+        "broken_found": "\n🔧 Found {} broken mirror(s) (empty shell from previous failed migration).",
+        "broken_repairing": "🛠️  Auto-repairing: deleting broken shells for re-migration...",
+        "broken_deleted": "   ✖ Deleted broken shell: {}",
+        "broken_delete_fail": "   ⚠️  Failed to delete: {}",
+        "broken_repaired": "✅ Repaired {} broken mirror(s). They will be re-migrated.",
+        "cleanup_shell": "🧹 Cleaned up broken shell left by failed migration: {}",
+        "incremental_summary": "\n🧲 Incremental sync: {} on Gitea ({} healthy, {} broken to repair), {} new.",
         "scan_result": "\n📦 Scanned {} repos total (Owned: {}, Org/Collab: {}).",
         "section_owned": "【Your Repositories】",
         "section_other": "\n【Organization & Collaborator Repositories】({} repos)",
@@ -140,12 +147,20 @@ MESSAGES = {
         "dry_run_diff": "\n🧪 演习结果: 发现 {} 个新仓库需要迁移，{} 个已存在将被跳过。",
         "fetching_gitea": "\n🔍 正在获取 Gitea 已存在仓库列表...",
         "fetch_gitea_fail": "\n⚠️  获取 Gitea 仓库失败，继续执行但不做增量过滤。错误: {}",
-        "incremental_summary": "\n🧮 增量同步: Gitea 已存在 {} 个，将跳过 {} 个。",
+        "incremental_summary_legacy": "\n🧲 增量同步: Gitea 已存在 {} 个，将跳过 {} 个。",
         "status_header": "\n📋 仓库状态对比 (GitHub 选择范围 vs Gitea)",
         "status_legend": "图例: {} GitHub 独有  {} 两端都有  {} Gitea 独有",
         "status_github_only": "GitHub 独有",
-        "status_both": "两端都有",
+        "status_both": "两端都有 (健康)",
+        "status_broken": "🔧 损坏镜像 (空壳)",
         "status_gitea_only": "Gitea 独有",
+        "broken_found": "\n🔧 发现 {} 个损坏镜像（上次迁移失败后留下的空壳）。",
+        "broken_repairing": "🛠️  自动修复: 删除空壳以便重新迁移...",
+        "broken_deleted": "   ✖ 已删除空壳: {}",
+        "broken_delete_fail": "   ⚠️  删除失败: {}",
+        "broken_repaired": "✅ 已修复 {} 个损坏镜像，它们将被重新迁移。",
+        "cleanup_shell": "🧹 已清理迁移失败后留下的空壳: {}",
+        "incremental_summary": "\n🧲 增量同步: Gitea 上 {} 个 ({} 个健康, {} 个损坏待修复), {} 个新仓库。",
         "scan_result": "\n📦 共扫描到 {} 个仓库 (个人: {} 个，组织/协作: {} 个)。",
         "section_owned": "【个人所属仓库】",
         "section_other": "\n【组织与协作仓库】(共 {} 个)",
@@ -500,14 +515,17 @@ def fetch_github_repos(token: str, logger: logging.Logger) -> List[Repo]:
 # ---------------------------------------------------------------------------
 # Gitea API
 # ---------------------------------------------------------------------------
-def fetch_gitea_repo_names(
+def fetch_gitea_repos(
     gitea_url: str,
     gitea_token: str,
     gitea_user: str,
     logger: logging.Logger,
-) -> Set[str]:
-    """Fetch repo names owned by the Gitea user (paginated)."""
-    names = set()
+) -> Dict[str, Dict[str, Any]]:
+    """Fetch repos owned by the Gitea user with health metadata (paginated).
+
+    Returns dict: {repo_name: {"mirror": bool, "empty": bool, "original_url": str}}
+    """
+    repos: Dict[str, Dict[str, Any]] = {}
     page = 1
     while True:
         url = f"{gitea_url}/api/v1/user/repos?limit=50&page={page}"
@@ -527,23 +545,84 @@ def fetch_gitea_repo_names(
             if owner.lower() == gitea_user.lower():
                 name = repo.get("name")
                 if name:
-                    names.add(name)
+                    repos[name] = {
+                        "mirror": repo.get("mirror", False),
+                        "empty": repo.get("empty", False),
+                        "original_url": repo.get("original_url", ""),
+                    }
 
-        logger.debug(f"Gitea API page {page}: {len(data)} repos (owned: {len(names)})")
+        logger.debug(f"Gitea API page {page}: {len(data)} repos (owned: {len(repos)})")
         page += 1
 
-    return names
+    return repos
+
+
+def delete_gitea_repo(
+    gitea_url: str,
+    gitea_token: str,
+    gitea_user: str,
+    repo_name: str,
+    logger: logging.Logger,
+) -> bool:
+    """Delete a repo from Gitea. Returns True if deleted, False on error."""
+    url = f"{gitea_url}/api/v1/repos/{gitea_user}/{repo_name}"
+    req = urllib.request.Request(url, method="DELETE")
+    req.add_header("Authorization", f"token {gitea_token}")
+    req.add_header("User-Agent", f"gitea-github-mirror/{VERSION}")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            resp.read()
+        return True
+    except Exception as e:
+        logger.debug(f"Failed to delete {repo_name}: {e}")
+        return False
+
+
+def cleanup_failed_migration(
+    gitea_url: str,
+    gitea_token: str,
+    gitea_user: str,
+    repo_name: str,
+    logger: logging.Logger,
+) -> bool:
+    """Layer 2: After migration failure, check if Gitea created a broken shell and delete it."""
+    check_url = f"{gitea_url}/api/v1/repos/{gitea_user}/{repo_name}"
+    req = urllib.request.Request(check_url)
+    req.add_header("Authorization", f"token {gitea_token}")
+    req.add_header("Accept", "application/json")
+    req.add_header("User-Agent", f"gitea-github-mirror/{VERSION}")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        if data.get("empty", False):
+            deleted = delete_gitea_repo(gitea_url, gitea_token, gitea_user, repo_name, logger)
+            if deleted:
+                logger.debug(f"Cleaned up broken shell: {repo_name}")
+            return deleted
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return False  # Not created, nothing to clean
+    except Exception:
+        pass
+    return False
 
 
 def _print_repo_status(
-    logger: logging.Logger, github_repos: List[Repo], gitea_names: Set[str], lang: str
+    logger: logging.Logger,
+    github_repos: List[Repo],
+    gitea_repos: Dict[str, Dict[str, Any]],
+    broken_names: Set[str],
+    lang: str,
 ) -> None:
+    """Print a colored status comparison: GitHub vs Gitea."""
+    gitea_names = set(gitea_repos.keys())
     if not gitea_names:
         return
 
     github_names = {r["name"] for r in github_repos}
     github_only = sorted(github_names - gitea_names)
-    both = sorted(github_names & gitea_names)
+    both_healthy = sorted((github_names & gitea_names) - broken_names)
+    both_broken = sorted(broken_names & github_names)
     gitea_only = sorted(gitea_names - github_names)
 
     t = MESSAGES[lang]
@@ -561,9 +640,14 @@ def _print_repo_status(
         for line in _format_repo_list(header, github_only, "32"):
             logger.info(line)
 
-    if both:
-        header = f"【{t['status_both']}】({len(both)})"
-        for line in _format_repo_list(header, both, "33"):
+    if both_broken:
+        header = f"【{t['status_broken']}】({len(both_broken)})"
+        for line in _format_repo_list(header, both_broken, "31"):
+            logger.info(line)
+
+    if both_healthy:
+        header = f"【{t['status_both']}】({len(both_healthy)})"
+        for line in _format_repo_list(header, both_healthy, "33"):
             logger.info(line)
 
     if gitea_only:
@@ -720,6 +804,7 @@ def migrate_single_repo(
                     last_error = f"HTTP 422: {reason}"
                     with _print_lock:
                         logger.error(f"{prefix} ... {T['failed'].format(last_error)}")
+                    cleanup_failed_migration(gitea_url, gitea_token, gitea_user, repo_name, logger)
                     return {
                         "name": repo_name,
                         "status": "failed",
@@ -759,6 +844,12 @@ def migrate_single_repo(
             else:
                 with _print_lock:
                     logger.error(f"{prefix} ... {T['failed'].format(last_error)}")
+
+    # Layer 2: Clean up broken shell left by Gitea's create-before-clone behavior
+    cleaned = cleanup_failed_migration(gitea_url, gitea_token, gitea_user, repo_name, logger)
+    if cleaned:
+        with _print_lock:
+            logger.info(f"{prefix} ... {T['cleanup_shell'].format(repo_name)}")
 
     return {
         "name": repo_name,
@@ -900,7 +991,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    lang = args.lang or os.environ.get("LANG_MIRROR", "cn")
+    lang = args.lang or os.environ.get("LANG_MIRROR", "en")
     if lang not in ("en", "cn"):
         lang = "en"
     T = MESSAGES[lang]
@@ -993,22 +1084,51 @@ def main() -> None:
         final_repos = list(all_repos)
         logger.info(T["include_orgs_yes"].format(len(final_repos)))
 
-    # Phase 3.5: Incremental skip (avoid migrate API for existing repos)
-    gitea_existing = set()
+    # Phase 3.5: Incremental sync with mirror health check
+    gitea_repos: Dict[str, Dict[str, Any]] = {}
     try:
         logger.info(T["fetching_gitea"])
-        gitea_existing = fetch_gitea_repo_names(gitea_url, gitea_token, gitea_user, logger)
+        gitea_repos = fetch_gitea_repos(gitea_url, gitea_token, gitea_user, logger)
     except Exception as e:
         logger.warning(T["fetch_gitea_fail"].format(str(e)))
 
     skipped = 0
+    broken_names: Set[str] = set()
     selected_repos = list(final_repos)
-    if gitea_existing:
+
+    if gitea_repos:
+        # Classify existing Gitea repos by health
+        healthy_names: Set[str] = set()
+        for name, info in gitea_repos.items():
+            if info.get("mirror") and info.get("empty"):
+                broken_names.add(name)
+            else:
+                healthy_names.add(name)
+
+        # Layer 1: Auto-repair broken mirrors (delete empty shells)
+        if broken_names:
+            logger.info(T["broken_found"].format(len(broken_names)))
+            logger.info(T["broken_repairing"])
+            repaired = 0
+            for name in sorted(broken_names):
+                if delete_gitea_repo(gitea_url, gitea_token, gitea_user, name, logger):
+                    logger.info(T["broken_deleted"].format(name))
+                    repaired += 1
+                else:
+                    logger.warning(T["broken_delete_fail"].format(name))
+            if repaired:
+                logger.info(T["broken_repaired"].format(repaired))
+
+        # Filter: skip healthy repos, keep broken ones for re-migration
+        github_names = {r["name"] for r in final_repos}
+        new_count = len(github_names - set(gitea_repos.keys()))
         before_count = len(final_repos)
-        final_repos = [r for r in final_repos if r["name"] not in gitea_existing]
+        final_repos = [r for r in final_repos if r["name"] not in healthy_names]
         skipped = before_count - len(final_repos)
-        logger.info(T["incremental_summary"].format(len(gitea_existing), skipped))
-        _print_repo_status(logger, selected_repos, gitea_existing, lang)
+        logger.info(T["incremental_summary"].format(
+            len(gitea_repos), len(healthy_names), len(broken_names), new_count
+        ))
+        _print_repo_status(logger, selected_repos, gitea_repos, broken_names, lang)
 
     if args.dry_run:
         logger.info(T["dry_run_diff"].format(len(final_repos), skipped))
