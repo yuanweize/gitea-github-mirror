@@ -48,7 +48,7 @@ Once configured, Gitea will **automatically sync** from GitHub on a schedule (de
 | ⚙️ **Graceful Shutdown** | Ctrl+C triggers clean exit — finishes in-flight tasks, generates report |
 | ⚡ **Zero Dependencies** | Pure Python 3 stdlib — no `pip install` needed |
 
-> **💡 v2.2.0 Highlights:** Mirror health check with auto-repair for broken shells, post-failure cleanup to prevent ghost repos.
+> **💡 v2.4.0 Highlights:** Strict GitHub Organization replication (PRESERVE_ORGS), `SYNC_NOW` for instant updates, and `FORCE_RECREATE` for full remigrations.
 
 ---
 
@@ -387,7 +387,7 @@ After each run, a Markdown report is generated in the `reports/` directory:
 # 📊 Execution Report
 
 **Date:** 2026-05-27 14:30:00
-**Version:** v2.0.0
+**Version:** v2.4.0
 **Mode:** Concurrent (strict synchronous per worker)
 
 ## Summary
