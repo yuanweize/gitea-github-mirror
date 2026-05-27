@@ -59,7 +59,6 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 LOGS_DIR = SCRIPT_DIR / "logs"
 REPORTS_DIR = SCRIPT_DIR / "reports"
 ENV_FILE = SCRIPT_DIR / ".env"
-BLOCKLIST_FILE = SCRIPT_DIR / "blocklist.json"
 
 # ---------------------------------------------------------------------------
 # Internationalization (i18n)
@@ -98,8 +97,6 @@ MESSAGES = {
         "broken_delete_fail": "   ⚠️  Failed to delete: {}",
         "broken_repaired": "✅ Repaired {} broken mirror(s). They will be re-migrated.",
         "cleanup_shell": "🧹 Cleaned up broken shell left by failed migration: {}",
-        "blocklist_skipped": "🚫 Skipped {} permanently blocked repos (from blocklist.json).",
-        "blocklist_added": "📝 Added {} newly blocked repo(s) to blocklist.json.",
         "incremental_summary": "\n🧲 Incremental sync: {} on Gitea ({} healthy, {} broken to repair), {} new.",
         "scan_result": "\n📦 Scanned {} repos total (Owned: {}, Org/Collab: {}).",
         "section_owned": "【Your Repositories】",
@@ -163,9 +160,7 @@ MESSAGES = {
         "broken_deleted": "   ✖ 已删除空壳: {}",
         "broken_delete_fail": "   ⚠️  删除失败: {}",
         "broken_repaired": "✅ 已修复 {} 个损坏镜像，它们将被重新迁移。",
-        "cleanup_shell": "🧹 已清理失败迁移残留的空壳镜像: {}",
-        "blocklist_skipped": "🚫 已跳过 {} 个被永久封锁的仓库 (读取自 blocklist.json)。",
-        "blocklist_added": "📝 已将 {} 个新增的被封锁仓库加入 blocklist.json。",
+        "cleanup_shell": "🧹 已清理迁移失败后留下的空壳: {}",
         "incremental_summary": "\n🧲 增量同步: Gitea 上 {} 个 ({} 个健康, {} 个损坏待修复), {} 个新仓库。",
         "scan_result": "\n📦 共扫描到 {} 个仓库 (个人: {} 个，组织/协作: {} 个)。",
         "section_owned": "【个人所属仓库】",
@@ -613,24 +608,6 @@ def cleanup_failed_migration(
     return False
 
 
-def load_blocklist() -> Dict[str, str]:
-    if BLOCKLIST_FILE.exists():
-        try:
-            with open(BLOCKLIST_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-    return {}
-
-
-def save_blocklist(blocklist: Dict[str, str]):
-    try:
-        with open(BLOCKLIST_FILE, "w", encoding="utf-8") as f:
-            json.dump(blocklist, f, indent=2, ensure_ascii=False)
-    except Exception:
-        pass
-
-
 def _print_repo_status(
     logger: logging.Logger,
     github_repos: List[Repo],
@@ -788,6 +765,10 @@ def migrate_single_repo(
                 reason = _extract_error_message(err_body)
                 with _print_lock:
                     logger.warning(f"{prefix} ... {T['blocked']} — {reason}")
+                
+                # Layer 2: Clean up empty shell for blocked repos too
+                cleanup_failed_migration(gitea_url, gitea_token, gitea_user, repo_name, logger)
+                
                 return {
                     "name": repo_name,
                     "status": "blocked",
@@ -1108,15 +1089,6 @@ def main() -> None:
         final_repos = list(all_repos)
         logger.info(T["include_orgs_yes"].format(len(final_repos)))
 
-    # Phase 3.25: Filter out permanently blocked repos
-    blocklist = load_blocklist()
-    if blocklist:
-        before_count = len(final_repos)
-        final_repos = [r for r in final_repos if r["name"] not in blocklist]
-        skipped_blocked = before_count - len(final_repos)
-        if skipped_blocked > 0:
-            logger.info(T["blocklist_skipped"].format(skipped_blocked))
-
     # Phase 3.5: Incremental sync with mirror health check
     gitea_repos: Dict[str, Dict[str, Any]] = {}
     try:
@@ -1228,13 +1200,6 @@ def main() -> None:
     signal.signal(signal.SIGINT, _original_sigint)
 
     total_duration = time.time() - start_time
-
-    # Update blocklist with any newly blocked repos
-    newly_blocked = {r["name"]: r["error"] for r in all_results if r["status"] == "blocked"}
-    if newly_blocked:
-        blocklist.update(newly_blocked)
-        save_blocklist(blocklist)
-        logger.info(T["blocklist_added"].format(len(newly_blocked)))
 
     # Phase 6: Report
     logger.info(T["done"])
