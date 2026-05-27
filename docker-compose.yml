@@ -1,0 +1,30 @@
+services:
+  gitea-github-mirror:
+    image: ghcr.io/yuanweize/gitea-github-mirror:latest
+    # Or build locally:
+    # build: .
+    container_name: gitea-github-mirror
+    restart: "no"
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/app/logs
+      - ./reports:/app/reports
+    # Override default CMD to customize language or behavior:
+    # command: ["--lang", "cn", "--yes", "--include-orgs"]
+
+  # Optional: Run on a schedule with ofelia (cron for Docker)
+  # Uncomment below to auto-run the mirror every 6 hours:
+  #
+  # scheduler:
+  #   image: mcuadros/ofelia:latest
+  #   container_name: mirror-scheduler
+  #   restart: unless-stopped
+  #   depends_on:
+  #     - gitea-github-mirror
+  #   command: daemon --docker
+  #   volumes:
+  #     - /var/run/docker.sock:/var/run/docker.sock:ro
+  #   labels:
+  #     ofelia.job-run.mirror.schedule: "0 0 */6 * * *"
+  #     ofelia.job-run.mirror.container: "gitea-github-mirror"

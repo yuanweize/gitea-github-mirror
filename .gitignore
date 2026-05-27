@@ -1,0 +1,27 @@
+# Dependencies
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Environment (contains secrets!)
+.env
+
+# Runtime artifacts (persisted via volumes in Docker)
+logs/
+reports/
+
+# macOS
+.DS_Store
+._*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Misc
+*.bak
+*.tmp
