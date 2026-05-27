@@ -521,40 +521,76 @@ def fetch_gitea_repos(
     gitea_token: str,
     logger: logging.Logger,
 ) -> Dict[str, Dict[str, Any]]:
-    """Fetch repos the Gitea user has access to with health metadata (paginated).
+    """Fetch all repos the Gitea user has access to (personal + orgs) with health metadata.
 
     Returns dict: {"owner/repo_name": {"mirror": bool, "empty": bool, "original_url": str, "owner": str, "name": str}}
     """
     repos: Dict[str, Dict[str, Any]] = {}
+    
+    def _fetch_paginated(api_path: str, context_name: str) -> None:
+        page = 1
+        total_fetched = 0
+        while True:
+            url = f"{gitea_url}/api/v1/{api_path}?limit=50&page={page}"
+            req = urllib.request.Request(url)
+            req.add_header("Authorization", f"token {gitea_token}")
+            req.add_header("Accept", "application/json")
+            req.add_header("User-Agent", f"gitea-github-mirror/{VERSION}")
+
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to fetch {api_path}: {e}")
+                break
+
+            if not data:
+                break
+
+            for repo in data:
+                owner = repo.get("owner", {}).get("login", "")
+                name = repo.get("name")
+                if owner and name:
+                    key = f"{owner.lower()}/{name.lower()}"
+                    repos[key] = {
+                        "mirror": repo.get("mirror", False),
+                        "empty": repo.get("empty", False),
+                        "original_url": repo.get("original_url", ""),
+                        "owner": owner,
+                        "name": name,
+                    }
+                    total_fetched += 1
+
+            page += 1
+        logger.debug(f"Fetched {total_fetched} repos from {context_name}")
+
+    # 1. Fetch personal repos
+    _fetch_paginated("user/repos", "personal repos")
+
+    # 2. Fetch user orgs, then repos for each org
     page = 1
+    orgs = []
     while True:
-        url = f"{gitea_url}/api/v1/user/repos?limit=50&page={page}"
+        url = f"{gitea_url}/api/v1/user/orgs?limit=50&page={page}"
         req = urllib.request.Request(url)
         req.add_header("Authorization", f"token {gitea_token}")
         req.add_header("Accept", "application/json")
         req.add_header("User-Agent", f"gitea-github-mirror/{VERSION}")
-
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-
+        
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except Exception:
+            break
+            
         if not data:
             break
-
-        for repo in data:
-            owner = repo.get("owner", {}).get("login", "")
-            name = repo.get("name")
-            if owner and name:
-                key = f"{owner.lower()}/{name.lower()}"
-                repos[key] = {
-                    "mirror": repo.get("mirror", False),
-                    "empty": repo.get("empty", False),
-                    "original_url": repo.get("original_url", ""),
-                    "owner": owner,
-                    "name": name,
-                }
-
-        logger.debug(f"Gitea API page {page}: {len(data)} repos fetched")
+            
+        orgs.extend([o.get("username") for o in data if o.get("username")])
         page += 1
+
+    for org in orgs:
+        _fetch_paginated(f"orgs/{org}/repos", f"org {org}")
 
     return repos
 
