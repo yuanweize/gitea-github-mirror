@@ -49,7 +49,7 @@ import urllib.response
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Set, Optional
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -351,7 +351,7 @@ def _send_webhook_message(
     logger: logging.Logger,
     lang: str,
 ) -> None:
-    payload = None
+    payload: Dict[str, Any]
     if webhook_type == "telegram":
         if not notify_chat_id:
             raise ValueError("NOTIFY_CHAT_ID is required for Telegram")
@@ -987,7 +987,7 @@ def migrate_single_repo(
                     logger.error(f"{prefix} ... {T['failed'].format(last_error)}")
 
     # Layer 2: Clean up broken shell left by Gitea's create-before-clone behavior
-    cleaned = cleanup_failed_migration(gitea_url, gitea_token, gitea_user, repo_name, logger)
+    cleaned = cleanup_failed_migration(gitea_url, gitea_token, repo_owner, repo_name, logger)
     if cleaned:
         with _print_lock:
             logger.info(f"{prefix} ... {T['cleanup_shell'].format(repo_name)}")
@@ -1299,9 +1299,9 @@ def main() -> None:
             logger.info(T["broken_repairing"])
             repaired = 0
             for key in sorted(broken_keys):
-                info = gitea_repos.get(key)
-                owner = info["owner"] if info else key.split("/")[0]
-                name = info["name"] if info else key.split("/")[1]
+                repo_info: Optional[Dict[str, Any]] = gitea_repos.get(key)
+                owner = repo_info["owner"] if repo_info else key.split("/")[0]
+                name = repo_info["name"] if repo_info else key.split("/")[1]
                 if delete_gitea_repo(gitea_url, gitea_token, owner, name, logger):
                     logger.info(T["broken_deleted"].format(f"{owner}/{name}"))
                     repaired += 1
