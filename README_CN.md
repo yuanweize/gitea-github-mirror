@@ -472,6 +472,7 @@ Gitea 的迁移 API 会在执行 `git clone` **之前**就创建数据库记录�
 - [songtianlun/mirrorGit](https://github.com/songtianlun/mirrorGit) - 提供了自动化镜像脚本的底层结构启示。
 - [jaedle/mirror-to-gitea](https://github.com/jaedle/mirror-to-gitea) - 启发了关于 Issues/Wiki 等全量元数据迁移的架构思路。
 - [jonasrosland/gitmirror](https://github.com/jonasrosland/gitmirror) - 启发了 `mirror-sync` 强制触发拉取的 API 机制。
+- [raylabshq/gitea-mirror](https://github.com/raylabshq/gitea-mirror) - 这是一个非常卓越的全栈 Web 服务，它通过周期性抓取 GitHub API 解决了元数据长期同步的问题。这让我们更加坚定了引入 `FORCE_RECREATE` 机制的价值：用极简的代码实现同等降维打击的威力。
 
 我们向这些开源项目的原作者致以最诚挚的感谢，感谢他们为开源生态做出的卓越贡献！
 

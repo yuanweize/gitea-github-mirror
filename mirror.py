@@ -721,13 +721,20 @@ def _print_repo_status(
     gitea_repos: Dict[str, Dict[str, Any]],
     broken_names: Set[str],
     lang: str,
+    gitea_user: str,
+    preserve_orgs: bool,
 ) -> None:
     """Print a colored status comparison: GitHub vs Gitea."""
     gitea_names = set(gitea_repos.keys())
     if not gitea_names:
         return
 
-    github_names = {r["name"] for r in github_repos}
+    github_names = set()
+    for r in github_repos:
+        repo_owner = gitea_user
+        if preserve_orgs and r.get("owner") and r["owner"].get("type") == "Organization":
+            repo_owner = r["owner"]["login"]
+        github_names.add(f"{repo_owner}/{r['name']}")
     github_only = sorted(github_names - gitea_names)
     both_healthy = sorted((github_names & gitea_names) - broken_names)
     both_broken = sorted(broken_names & github_names)

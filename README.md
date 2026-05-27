@@ -536,6 +536,7 @@ This project was built with inspiration and architectural insights from the foll
 - [songtianlun/mirrorGit](https://github.com/songtianlun/mirrorGit) - For the foundational logic of automated mirroring scripts.
 - [jaedle/mirror-to-gitea](https://github.com/jaedle/mirror-to-gitea) - For insights into comprehensive metadata migration mapping.
 - [jonasrosland/gitmirror](https://github.com/jonasrosland/gitmirror) - For the mechanics behind triggering Gitea's manual `mirror-sync` API.
+- [raylabshq/gitea-mirror](https://github.com/raylabshq/gitea-mirror) - A full-stack web application that solves metadata synchronization through periodic GitHub API scraping. Their architecture reinforced the value of our `FORCE_RECREATE` approach as a lightweight, zero-dependency alternative.
 
 We sincerely thank the authors of these projects for their contributions to the open-source ecosystem.
 
