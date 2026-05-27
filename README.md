@@ -9,7 +9,7 @@
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg?logo=docker)](Dockerfile)
 [![GitHub Actions](https://img.shields.io/badge/CI-GitHub%20Actions-2088FF.svg?logo=github-actions)](https://github.com/yuanweize/gitea-github-mirror/actions)
 
-[English](#-overview) · [简体中文](#-概述)
+[English](#-overview) · [简体中文](README_CN.md)
 
 ---
 
@@ -412,99 +412,7 @@ This tool interacts with two REST APIs:
 
 ---
 
-## 📖 概述
-
-**Gitea GitHub Mirror** 是一个零依赖的 Python 命令行工具，可以自动发现您 GitHub 账号下的所有仓库（公开、私有、Fork、组织和协作者仓库），并在您自建的 [Gitea](https://gitea.io) 服务器上创建**拉取镜像 (Pull Mirror)**。
-
-配置完成后，Gitea 会**自动定期从 GitHub 同步**（默认每 8 小时），保证您的自托管备份始终是最新的，无需任何手动操作。
-
-### ✨ 核心特性
-
-| 特性 | 说明 |
-|------|------|
-| 🔍 **自动发现** | 通过 GitHub API 扫描所有仓库（个人 + 组织 + 协作者） |
-| 🪞 **拉取镜像** | 创建 Gitea Pull Mirror，定期自动从 GitHub 拉取更新 |
-| 🚀 **触发即走** | 采用 Fire-and-Forget 模式下发请求，彻底规避 Nginx 504 超时 |
-| 🌍 **双语界面** | 完整的英文和简体中文界面支持 |
-| 🔄 **自动重试** | 瞬态错误自动指数退避重试（可配置次数和延迟） |
-| 📊 **执行报告** | 每次运行后自动生成 Markdown 格式的详细报告（含耗时、成功/失败统计） |
-| 📝 **结构化日志** | 控制台 + 日志文件双输出，带时间戳 |
-| 🐳 **容器化** | Alpine Docker 镜像 + Docker Compose + GitHub Actions 自动构建 |
-| 🔐 **安全设计** | 敏感信息通过 `.env` 配置，Docker 非 root 用户运行 |
-| 📁 **自动轮转** | 日志（最多 30 个）和报告（最多 50 个）自动清理，防止磁盘溢出 |
-| ⚡ **零依赖** | 纯 Python 3 标准库，无需 `pip install` |
-
-### 🚀 快速开始
-
-```bash
-# 克隆项目
-git clone https://github.com/yuanweize/gitea-github-mirror.git
-cd gitea-github-mirror
-
-# 配置环境变量
-cp .env.example .env
-# 编辑 .env 填入您的 Token 和 URL
-
-# 使用中文界面运行（交互模式）
-python3 mirror.py --lang cn
-
-# 使用中文界面运行（非交互模式，自动确认）
-python3 mirror.py --lang cn --yes
-
-# 使用 Docker Compose（前台运行，查看实时输出）
-docker compose up
-
-# 使用 Docker Compose（后台持久运行）
-docker compose up -d
-```
-
-### ⚙️ 配置说明
-
-| 变量名 | 必填 | 默认值 | 说明 |
-|--------|------|--------|------|
-| `GITEA_URL` | ✅ | — | 您的 Gitea 实例地址 |
-| `GITEA_TOKEN` | ✅ | — | Gitea API 访问令牌 |
-| `GITEA_USER` | ✅ | — | Gitea 用户名（镜像仓库的所有者） |
-| `GITHUB_TOKEN` | ✅ | — | GitHub 个人访问令牌（需要 `repo` 权限） |
-| `GITHUB_USER` | ✅ | — | GitHub 用户名 |
-| `MIRROR_INTERVAL` | — | 服务器默认 | 同步间隔（如 `8h0m0s`） |
-| `REQUEST_TIMEOUT` | — | `15` | 单次 HTTP 请求超时（秒） |
-| `MAX_RETRIES` | — | `3` | 每个仓库的最大重试次数 |
-| `RETRY_DELAY` | — | `5` | 初始重试延迟（秒），指数退避 |
-| `DISPATCH_DELAY` | — | `0.5` | 连续请求间的延迟（秒） |
-| `LOG_LEVEL` | — | `INFO` | 日志级别 |
-| `REPORT_MAX_COUNT` | — | `50` | 最大报告存档数量 |
-| `LANG_MIRROR` | — | `en` | 界面语言：`en` 或 `cn` |
-
-### 🔥 Fire-and-Forget 模式
-
-**解决的问题：** 当 Gitea 通过 `POST /api/v1/repos/migrate` 接收到镜像请求后，它会在 HTTP 请求期间开始执行 `git clone`。对于 Commit 历史较长或体积较大的仓库，克隆时间可能超过反向代理（Nginx/Caddy/Traefik）的超时限制（通常 60 秒），导致返回 `504 Gateway Timeout`。
-
-**关键事实：** Gitea 的后台协程队列已经接受了任务，即使 HTTP 连接被 Nginx 切断，克隆仍会继续执行并最终成功。
-
-**本工具的策略：**
-- 使用短超时（默认 15 秒）快速下发请求
-- `504`/`502`/`Socket Timeout` 均视为"已下发"（📨），不视为失败
-- 仅 `422`（请求无效）才判定为真正失败
-- 196 个仓库的请求下发可在 2 分钟内完成，而非 30 分钟以上
-
-### 📋 命令行参数
-
-```bash
-python3 mirror.py --help
-
-# 完整参数列表：
-#   --lang {en,cn}     界面语言
-#   --yes, -y          跳过所有确认提示
-#   --include-orgs     包含组织和协作者仓库
-#   --dry-run          模拟运行，不实际调用 Gitea API
-#   --timeout SECONDS  自定义 HTTP 超时时间
-```
-
-所有 CLI 命令和功能与英文版完全一致，详细的 API 文档、架构图和错误处理策略请参阅上方英文文档。
-
----
-
 ## 📄 License
 
 [MIT](LICENSE) © 2026 [yuanweize](https://github.com/yuanweize)
+
