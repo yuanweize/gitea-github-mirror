@@ -90,6 +90,7 @@ MESSAGES = {
         "status_github_only": "GitHub-only",
         "status_both": "In both (healthy)",
         "status_broken": "🔧 Broken mirror (empty)",
+        "status_gitea_only": "Gitea-only",
         "broken_found": "\n🔧 Found {} broken mirror(s) (empty shell from previous failed migration).",
         "broken_repairing": "🛠️  Auto-repairing: deleting broken shells for re-migration...",
         "broken_deleted": "   ✖ Deleted broken shell: {}",
