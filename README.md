@@ -529,7 +529,20 @@ Gitea's migration API creates the database record **before** starting `git clone
 
 ---
 
+## 🙏 Acknowledgements
+
+This project was built with inspiration and architectural insights from the following excellent open-source projects in the Gitea community:
+
+- [songtianlun/mirrorGit](https://github.com/songtianlun/mirrorGit) - For the foundational logic of automated mirroring scripts.
+- [jaedle/mirror-to-gitea](https://github.com/jaedle/mirror-to-gitea) - For insights into comprehensive metadata migration mapping.
+- [situ2001/gitea-bulk-migration](https://github.com/situ2001/gitea-bulk-migration) - For ideas surrounding bulk repository discovery and batching.
+- [jonasrosland/gitmirror](https://github.com/jonasrosland/gitmirror) - For the mechanics behind triggering Gitea's manual `mirror-sync` API.
+- [dustin/gitmirror](https://github.com/dustin/gitmirror) - For structural concepts in Gitea automation.
+
+We sincerely thank the authors of these projects for their contributions to the open-source ecosystem.
+
+---
+
 ## 📄 License
 
 [MIT](LICENSE) © 2026 [yuanweize](https://github.com/yuanweize)
-
