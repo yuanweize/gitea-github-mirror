@@ -45,19 +45,22 @@ def test_fetch_github_repos_paginates() -> None:
     assert [r["name"] for r in repos] == ["a", "b"]
 
 
-def test_fetch_gitea_repo_names_filters_owner() -> None:
+def test_fetch_gitea_repos_filters_owner() -> None:
     page1 = [
-        {"name": "repo1", "owner": {"login": "alice"}},
-        {"name": "repo2", "owner": {"login": "bob"}},
+        {"name": "repo1", "owner": {"login": "alice"}, "mirror": True, "empty": False},
+        {"name": "repo2", "owner": {"login": "bob"}, "mirror": False, "empty": True},
     ]
     page2: List[Dict[str, Any]] = []
 
     responses = [FakeResponse(page1), FakeResponse(page2)]
 
     with patch("mirror.urllib.request.urlopen", side_effect=responses):
-        names = mirror.fetch_gitea_repo_names("https://gitea", "t", "alice", _logger())
+        repos = mirror.fetch_gitea_repos("https://gitea", "t", "alice", _logger())
 
-    assert names == {"repo1"}
+    assert "repo1" in repos
+    assert repos["repo1"]["mirror"] is True
+    assert repos["repo1"]["empty"] is False
+    assert "repo2" not in repos
 
 
 def test_detect_webhook_type() -> None:
