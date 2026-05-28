@@ -1,5 +1,4 @@
 import json
-import sys
 import urllib.request
 
 URL = "https://git.eurun.eu.org"

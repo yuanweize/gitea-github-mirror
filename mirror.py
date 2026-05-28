@@ -551,7 +551,8 @@ def fetch_gitea_repos(
                     )
                     if attempt == max_retries:
                         raise RuntimeError(
-                            f"Fatal error: Could not fetch {api_path} from Gitea after {max_retries} attempts. Aborting to prevent inconsistent state."
+                            f"Fatal error: Could not fetch {api_path} from Gitea after "
+                            f"{max_retries} attempts. Aborting to prevent inconsistent state."
                         )
                     time.sleep(2**attempt)
                     attempt += 1
