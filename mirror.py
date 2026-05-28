@@ -526,7 +526,7 @@ def fetch_gitea_repos(
     Returns dict: {"owner/repo_name": {"mirror": bool, "empty": bool, "original_url": str, "owner": str, "name": str}}
     """
     repos: Dict[str, Dict[str, Any]] = {}
-    
+
     def _fetch_paginated(api_path: str, context_name: str) -> None:
         page = 1
         total_fetched = 0
@@ -546,9 +546,13 @@ def fetch_gitea_repos(
                         data = json.loads(resp.read().decode("utf-8"))
                         break
                 except Exception as e:
-                    logger.warning(f"⚠️ Failed to fetch {api_path} (page {page}, attempt {attempt}/{max_retries}): {e}")
+                    logger.warning(
+                        f"⚠️ Failed to fetch {api_path} (page {page}, attempt {attempt}/{max_retries}): {e}"
+                    )
                     if attempt == max_retries:
-                        raise RuntimeError(f"Fatal error: Could not fetch {api_path} from Gitea after {max_retries} attempts. Aborting to prevent inconsistent state.")
+                        raise RuntimeError(
+                            f"Fatal error: Could not fetch {api_path} from Gitea after {max_retries} attempts. Aborting to prevent inconsistent state."
+                        )
                     time.sleep(2**attempt)
                     attempt += 1
 
@@ -584,7 +588,7 @@ def fetch_gitea_repos(
         req.add_header("Authorization", f"token {gitea_token}")
         req.add_header("Accept", "application/json")
         req.add_header("User-Agent", f"gitea-github-mirror/{VERSION}")
-        
+
         attempt = 1
         max_retries = 3
         data = None
@@ -594,15 +598,19 @@ def fetch_gitea_repos(
                     data = json.loads(resp.read().decode("utf-8"))
                     break
             except Exception as e:
-                logger.warning(f"⚠️ Failed to fetch orgs (page {page}, attempt {attempt}/{max_retries}): {e}")
+                logger.warning(
+                    f"⚠️ Failed to fetch orgs (page {page}, attempt {attempt}/{max_retries}): {e}"
+                )
                 if attempt == max_retries:
-                    raise RuntimeError(f"Fatal error: Could not fetch orgs from Gitea after {max_retries} attempts.")
+                    raise RuntimeError(
+                        f"Fatal error: Could not fetch orgs from Gitea after {max_retries} attempts."
+                    )
                 time.sleep(2**attempt)
                 attempt += 1
-                
+
         if not data:
             break
-            
+
         orgs.extend([o.get("username") for o in data if o.get("username")])
         page += 1
 
@@ -1143,10 +1151,13 @@ def trigger_mirror_sync(
     try:
         with urllib.request.urlopen(req, timeout=15):
             with _print_lock:
-                logger.info(f"🔄 Triggered immediate sync for existing mirror: {repo_owner}/{repo_name}")
+                logger.info(
+                    f"🔄 Triggered immediate sync for existing mirror: {repo_owner}/{repo_name}"
+                )
     except Exception as e:
         with _print_lock:
             logger.warning(f"⚠️ Failed to trigger sync for {repo_owner}/{repo_name}: {e}")
+
 
 # ---------------------------------------------------------------------------
 # Main
@@ -1305,7 +1316,7 @@ def main() -> None:
     skipped = 0
     broken_keys: Set[str] = set()
     selected_repos = list(final_repos)
-    
+
     # Helper to get expected Gitea key for a GitHub repo
     def _get_expected_key(repo: Repo) -> str:
         owner = gitea_user
@@ -1371,7 +1382,9 @@ def main() -> None:
                 len(gitea_repos), len(healthy_keys), len(broken_keys), new_count
             )
         )
-        _print_repo_status(logger, selected_repos, gitea_repos, broken_keys, lang, gitea_user, preserve_orgs)
+        _print_repo_status(
+            logger, selected_repos, gitea_repos, broken_keys, lang, gitea_user, preserve_orgs
+        )
 
     if args.dry_run:
         logger.info(T["dry_run_diff"].format(len(final_repos), skipped))
@@ -1397,7 +1410,9 @@ def main() -> None:
 
     # Phase 4.8: Concurrent SYNC_NOW triggers
     if sync_tasks and not args.dry_run:
-        logger.info(f"🚀 Triggering mirror sync for {len(sync_tasks)} existing repositories concurrently...")
+        logger.info(
+            f"🚀 Triggering mirror sync for {len(sync_tasks)} existing repositories concurrently..."
+        )
         with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="sync") as pool:
             sync_futures = [
                 pool.submit(

@@ -3,6 +3,7 @@ import urllib.request, json, sys
 URL = "https://git.eurun.eu.org"
 TOKEN = "00bc6ae599e1e40be5187273dac1a83d19456bb7"
 
+
 def req(path, method="GET", data=None):
     r = urllib.request.Request(f"{URL}/api/v1/{path}", method=method)
     r.add_header("Authorization", f"token {TOKEN}")
@@ -18,6 +19,7 @@ def req(path, method="GET", data=None):
         print(f"ERROR {e.code} on {method} {path}: {e.read().decode('utf-8')}")
         return None
 
+
 print("1. GET /user/repos")
 repos = req("user/repos?limit=1")
 print(f"OK, returns list: {isinstance(repos, list)}")
@@ -31,7 +33,7 @@ if org_name:
     print(f"3. GET /orgs/{org_name}/repos")
     org_repos = req(f"orgs/{org_name}/repos?limit=1")
     print(f"OK, returns list: {isinstance(org_repos, list)}")
-    
+
     print(f"4. GET /orgs/{org_name}")
     org_info = req(f"orgs/{org_name}")
     print(f"OK, returns dict with username: {org_info.get('username') == org_name}")
