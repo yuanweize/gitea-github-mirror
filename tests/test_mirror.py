@@ -51,16 +51,18 @@ def test_fetch_gitea_repos_filters_owner() -> None:
         {"name": "repo2", "owner": {"login": "bob"}, "mirror": False, "empty": True},
     ]
     page2: List[Dict[str, Any]] = []
+    # Also need an empty org list response
+    empty_orgs: List[Dict[str, Any]] = []
 
-    responses = [FakeResponse(page1), FakeResponse(page2)]
+    responses = [FakeResponse(page1), FakeResponse(page2), FakeResponse(empty_orgs)]
 
     with patch("mirror.urllib.request.urlopen", side_effect=responses):
-        repos = mirror.fetch_gitea_repos("https://gitea", "t", "alice", _logger())
+        repos = mirror.fetch_gitea_repos("https://gitea", "t", _logger())
 
-    assert "repo1" in repos
-    assert repos["repo1"]["mirror"] is True
-    assert repos["repo1"]["empty"] is False
-    assert "repo2" not in repos
+    assert "alice/repo1" in repos
+    assert repos["alice/repo1"]["mirror"] is True
+    assert repos["alice/repo1"]["empty"] is False
+    assert "bob/repo2" in repos
 
 
 def test_detect_webhook_type() -> None:
