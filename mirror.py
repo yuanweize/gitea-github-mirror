@@ -49,7 +49,7 @@ import urllib.response
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Set, Optional
+from typing import Any, Dict, List, Optional, Set
 
 # ---------------------------------------------------------------------------
 # Constants

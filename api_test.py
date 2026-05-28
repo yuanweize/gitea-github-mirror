@@ -1,4 +1,5 @@
-import urllib.request, json
+import json
+import urllib.request
 
 url = "https://git.eurun.eu.org"
 token = "00bc6ae599e1e40be5187273dac1a83d19456bb7"
